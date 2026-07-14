@@ -6,6 +6,7 @@ from enum import StrEnum
 class AgentCapability(StrEnum):
     """Capabilities an agent can declare support for."""
 
+    CEO = "CEO"
     TREND_RESEARCH = "TREND_RESEARCH"
     AUDIENCE_RESEARCH = "AUDIENCE_RESEARCH"
     STRATEGY = "STRATEGY"
@@ -25,5 +26,6 @@ class AgentCapability(StrEnum):
     ANALYTICS = "ANALYTICS"
     BUSINESS_INTELLIGENCE = "BUSINESS_INTELLIGENCE"
     LEARNING = "LEARNING"
+    PREDICTION = "PREDICTION"
     MEMORY = "MEMORY"
     QUALITY_CONTROL = "QUALITY_CONTROL"
