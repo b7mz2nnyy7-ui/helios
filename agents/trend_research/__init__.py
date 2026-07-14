@@ -1,0 +1,1 @@
+"""Trend research agent package."""

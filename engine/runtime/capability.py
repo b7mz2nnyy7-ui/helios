@@ -1,0 +1,22 @@
+"""Agent capability definitions."""
+
+from enum import StrEnum
+
+
+class AgentCapability(StrEnum):
+    """Capabilities an agent can declare support for."""
+
+    TREND_RESEARCH = "TREND_RESEARCH"
+    AUDIENCE_RESEARCH = "AUDIENCE_RESEARCH"
+    STRATEGY = "STRATEGY"
+    SCRIPT_WRITING = "SCRIPT_WRITING"
+    STORYBOARD = "STORYBOARD"
+    VIDEO_PRODUCTION = "VIDEO_PRODUCTION"
+    THUMBNAIL = "THUMBNAIL"
+    CAPTION = "CAPTION"
+    PUBLISHING = "PUBLISHING"
+    ANALYTICS = "ANALYTICS"
+    BUSINESS_INTELLIGENCE = "BUSINESS_INTELLIGENCE"
+    LEARNING = "LEARNING"
+    MEMORY = "MEMORY"
+    QUALITY_CONTROL = "QUALITY_CONTROL"
