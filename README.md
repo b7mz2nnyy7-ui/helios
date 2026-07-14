@@ -18,6 +18,19 @@ Aktuell verwendet Atlas deterministische Mock-Trenddaten und ein Mock-LLM. Es
 werden keine echten APIs, keine Netzwerkzugriffe und keine externen LLM-Provider
 verwendet.
 
+## Local Content Pipeline Demo
+
+Der lokale Demo-Runner führt die vollständige Content-Pipeline ausschließlich
+mit deterministischen Mock-Daten aus:
+
+```bash
+uv run python scripts/run_content_pipeline.py "AI Agents"
+```
+
+Die Demo verwendet keine APIs, keine echten LLMs und kein echtes Rendering. Als
+Ergebnis entstehen ein providerneutraler `RenderJob` und ein lokaler
+Markdown-Report im Verzeichnis `output/`.
+
 ## Development Workflow
 
 Die verbindlichen Codex-Projektregeln stehen in [AGENTS.md](AGENTS.md).
