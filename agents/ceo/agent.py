@@ -1,12 +1,20 @@
 """Helios CEO agent."""
 
 from agents.business_intelligence.models import BusinessIntelligenceReport
+from agents.ceo.delegation import create_delegation_plan
 from agents.ceo.mock_llm_provider import MockCEOLLMProvider
 from agents.ceo.models import (
+    CEOOperatingPlan,
     CompanyPriority,
+    DelegationPlan,
     ExecutiveDecision,
     ExecutiveDecisionReport,
+    ExecutivePlan,
+    ResourcePlan,
 )
+from agents.ceo.orchestration import create_ceo_operating_plan
+from agents.ceo.planning import create_executive_plan
+from agents.ceo.resources import create_resource_plan
 from engine.llm.models import LLMRequest, LLMResponse
 from engine.runtime.base_agent import BaseAgent
 from engine.runtime.capability import AgentCapability
@@ -20,6 +28,10 @@ class CEOAgent(BaseAgent):
     """Helios agent for creating structured executive decision reports."""
 
     last_decision_report: ExecutiveDecisionReport | None
+    last_plan: ExecutivePlan | None
+    last_delegation_plan: DelegationPlan | None
+    last_resource_plan: ResourcePlan | None
+    last_operating_plan: CEOOperatingPlan | None
 
     def __init__(self, tools: list[BaseTool] | None = None) -> None:
         """Create the Helios CEO agent."""
@@ -29,6 +41,10 @@ class CEOAgent(BaseAgent):
             capabilities={AgentCapability.CEO},
         )
         self.last_decision_report = None
+        self.last_plan = None
+        self.last_delegation_plan = None
+        self.last_resource_plan = None
+        self.last_operating_plan = None
 
         for tool in self._build_tools(tools):
             self.add_tool(tool)
@@ -44,10 +60,7 @@ class CEOAgent(BaseAgent):
             business_report = self._get_business_report(
                 task.payload.get("business_report"),
             )
-            llm_request = self._create_llm_request(business_report)
-            llm_tool = self.get_tool("llm")
-            llm_response = self._get_llm_response(llm_tool.execute(request=llm_request))
-            report = self._create_report(llm_response)
+            report = self._create_decision_report(business_report)
             self.last_decision_report = report
             task.complete(report)
             return report
@@ -55,6 +68,60 @@ class CEOAgent(BaseAgent):
             if task.status is TaskStatus.RUNNING:
                 task.fail(str(error))
             raise
+
+    def create_plan(
+        self,
+        business_report: BusinessIntelligenceReport,
+    ) -> ExecutivePlan:
+        """Create a deterministic executive plan from a business report."""
+        validated_report = self._get_business_report(business_report)
+        decision_report = self._create_decision_report(validated_report)
+        self.last_decision_report = decision_report
+        plan = create_executive_plan(validated_report, decision_report)
+        self.last_plan = plan
+        return plan
+
+    def create_delegation_plan(
+        self,
+        executive_plan: ExecutivePlan,
+    ) -> DelegationPlan:
+        """Create a deterministic delegation plan from an executive plan."""
+        plan = create_delegation_plan(executive_plan)
+        self.last_delegation_plan = plan
+        return plan
+
+    def create_resource_plan(
+        self,
+        delegation_plan: DelegationPlan,
+    ) -> ResourcePlan:
+        """Create a deterministic resource plan from a delegation plan."""
+        plan = create_resource_plan(delegation_plan)
+        self.last_resource_plan = plan
+        return plan
+
+    def create_operating_plan(
+        self,
+        business_report: BusinessIntelligenceReport,
+    ) -> CEOOperatingPlan:
+        """Create a deterministic CEO operating plan from business intelligence."""
+        validated_report = self._get_business_report(business_report)
+        executive_plan = self.create_plan(validated_report)
+        decision_report = self.last_decision_report
+        if decision_report is None:
+            msg = "decision_report must be available after create_plan()."
+            raise ValueError(msg)
+
+        delegation_plan = self.create_delegation_plan(executive_plan)
+        resource_plan = self.create_resource_plan(delegation_plan)
+        operating_plan = create_ceo_operating_plan(
+            business_report=validated_report,
+            decision_report=decision_report,
+            executive_plan=executive_plan,
+            delegation_plan=delegation_plan,
+            resource_plan=resource_plan,
+        )
+        self.last_operating_plan = operating_plan
+        return operating_plan
 
     def _build_tools(self, tools: list[BaseTool] | None) -> list[BaseTool]:
         selected_tools = list(tools or [])
@@ -78,6 +145,15 @@ class CEOAgent(BaseAgent):
             raise ValueError(msg)
 
         return raw_response
+
+    def _create_decision_report(
+        self,
+        business_report: BusinessIntelligenceReport,
+    ) -> ExecutiveDecisionReport:
+        llm_request = self._create_llm_request(business_report)
+        llm_tool = self.get_tool("llm")
+        llm_response = self._get_llm_response(llm_tool.execute(request=llm_request))
+        return self._create_report(llm_response)
 
     def _create_llm_request(
         self,
