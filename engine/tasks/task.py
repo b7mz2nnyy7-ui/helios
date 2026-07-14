@@ -39,6 +39,19 @@ class Task:
         self._transition_to(TaskStatus.FAILED)
         self.error_message = error_message
 
+    def reset_for_retry(self) -> None:
+        """Reset a failed task to pending so it can be retried."""
+        if self.status is not TaskStatus.FAILED:
+            msg = (
+                f"Invalid task status transition from "
+                f"{self.status.value} to {TaskStatus.PENDING.value}."
+            )
+            raise ValueError(msg)
+
+        self.status = TaskStatus.PENDING
+        self.result = None
+        self.error_message = None
+
     def is_finished(self) -> bool:
         """Return whether the task has reached a finished state."""
         return self.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}
