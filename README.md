@@ -35,8 +35,26 @@ Markdown-Report im Verzeichnis `output/`.
 
 Zukünftige Media-Provider werden über `HELIOS_MEDIA_*`-Environment-Variablen
 konfiguriert. Secrets dürfen nicht committed werden; `.env.example` dient
-ausschließlich als Vorlage mit leeren Platzhaltern. Aktuell existieren nur
-lokale Mock-Provider und es ist noch keine echte Provider-API aktiv.
+ausschließlich als Vorlage mit leeren Platzhaltern. Neben lokalen Mock-Providern
+existiert ein standardmäßig gesperrter Runway-Adapter; keine echte Provider-API
+ist automatisch aktiv.
+
+## Guarded Runway Live Test
+
+Der lokale Runway-Test ist standardmaessig gesperrt. Live-Aufrufe koennen
+Kosten verursachen und werden nur bei expliziter CLI-Bestaetigung, aktivierter
+Environment-Freigabe, vorhandenem API-Key sowie konfiguriertem Preis und
+Kostenlimit ausgefuehrt. Der API-Key darf ausschliesslich ueber die Umgebung
+bereitgestellt werden. Es wird keine Videodatei automatisch heruntergeladen.
+
+```bash
+uv run --python 3.12 python scripts/run_runway_live_test.py \
+  "A calm cinematic sunrise over a modern city"
+```
+
+Das Kommando bleibt ohne alle Live-Freigaben im sicheren Dry-Run-Modus. In der
+Dokumentation und Beispielkonfiguration sind bewusst weder echte API-Keys noch
+Live-Preise enthalten.
 
 ## Development Workflow
 
