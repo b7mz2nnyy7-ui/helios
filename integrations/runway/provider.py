@@ -6,10 +6,15 @@ from engine.media.providers.config import ProviderConfigurationError
 from engine.media.render_job import RenderJob
 from engine.media.render_plan import VideoProductionPlan
 from integrations.runway.client import RunwayClient
-from integrations.runway.models import RunwayGenerationRequest, RunwayTask
+from integrations.runway.models import (
+    RunwayGenerationMode,
+    RunwayGenerationRequest,
+    RunwayTask,
+    normalize_runway_duration,
+)
 from integrations.runway.polling import RunwayPollingResult, RunwayTaskPoller
 
-RUNWAY_VERTICAL_RATIO = "768:1280"
+RUNWAY_VERTICAL_RATIO = "720:1280"
 _SUCCESS_STATUSES = {"SUCCEEDED"}
 _POLLING_STATUSES = {"PENDING", "THROTTLED", "RUNNING"}
 _FAILURE_STATUSES = {"FAILED", "CANCELED", "CANCELLED"}
@@ -50,6 +55,7 @@ class RunwayVideoProvider(MediaProvider):
             metadata={
                 "runway_task_id": task.task_id,
                 "output_url": output_url,
+                "output_url_is_temporary": True,
                 "plan_id": plan.plan_id,
                 "render_job_id": job.job_id,
                 "target_platform": plan.target_platform,
@@ -99,8 +105,12 @@ class RunwayVideoProvider(MediaProvider):
             model=model,
             prompt_text=build_runway_prompt(plan),
             ratio=RUNWAY_VERTICAL_RATIO,
-            duration_seconds=plan.total_duration_seconds,
+            duration_seconds=normalize_runway_duration(
+                model,
+                plan.total_duration_seconds,
+            ),
             seed=None,
+            mode=RunwayGenerationMode.TEXT_TO_VIDEO,
         )
 
     def _validate_succeeded_task(self, task: RunwayTask) -> None:

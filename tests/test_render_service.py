@@ -2,7 +2,9 @@
 
 import socket
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import patch
 
@@ -13,6 +15,8 @@ from engine.media.providers.registry import MediaProviderRegistry
 from engine.media.render_job import RenderJob, RenderJobStatus
 from engine.media.render_plan import RenderScene, VideoProductionPlan
 from engine.media.render_service import RenderService
+from engine.media.storage import MediaStorage, MediaStorageError
+from integrations.runway.http_transport import HTTPResponse
 
 
 def create_render_job(provider: str = "mock-video") -> RenderJob:
@@ -120,6 +124,42 @@ class FailingProvider(MediaProvider):
         del job
         msg = "provider unavailable"
         raise RuntimeError(msg)
+
+
+class DownloadableProvider(MockVideoProvider):
+    """Mock provider exposing a deterministic downloadable MP4 URL."""
+
+    def _render(self, job: RenderJob) -> MediaAsset:
+        """Add a temporary provider URL to the mock video asset."""
+        asset = super()._render(job)
+        asset.metadata["output_url"] = "https://cdn.example/video.mp4"
+        return asset
+
+
+class DownloadExecutor:
+    """Return deterministic MP4 bytes without network access."""
+
+    def __init__(self, status_code: int = 200) -> None:
+        """Create a fake download executor."""
+        self.status_code = status_code
+        self.calls = 0
+
+    def execute(
+        self,
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: bytes | None,
+        timeout_seconds: float,
+    ) -> HTTPResponse:
+        """Return one in-memory response."""
+        del method, url, headers, body, timeout_seconds
+        self.calls += 1
+        return HTTPResponse(
+            status_code=self.status_code,
+            headers={"Content-Type": "video/mp4"},
+            body=b"rendered-video" if self.status_code == 200 else b"error",
+        )
 
 
 def create_image_asset(job: RenderJob, provider_id: str) -> MediaAsset:
@@ -301,6 +341,53 @@ class RenderServiceTestCase(unittest.TestCase):
             asset = service.render(job)
 
         self.assertIs(asset.asset_type, MediaAssetType.VIDEO)
+
+    def test_optional_storage_completes_after_successful_download(self) -> None:
+        """Storage metadata is registered before the job completes."""
+        with TemporaryDirectory() as directory:
+            registry = MediaProviderRegistry()
+            registry.register(DownloadableProvider())
+            executor = DownloadExecutor()
+            storage = MediaStorage(Path(directory), executor=executor)
+            service = RenderService(registry, storage, store_output=True)
+            job = create_render_job()
+
+            asset = service.render(job)
+
+            self.assertIs(job.status, RenderJobStatus.COMPLETED)
+            self.assertIs(job.result_asset, asset)
+            self.assertEqual(executor.calls, 1)
+            self.assertIsNotNone(service.last_stored_asset)
+            stored = service.last_stored_asset
+            if stored is None:
+                self.fail("stored asset was not retained")
+            self.assertTrue(stored.local_path.exists())
+            self.assertEqual(asset.metadata["local_path"], str(stored.local_path))
+            self.assertEqual(asset.metadata["sha256"], stored.sha256)
+
+    def test_storage_failure_fails_running_job(self) -> None:
+        """A failed download prevents a false COMPLETED render job."""
+        with TemporaryDirectory() as directory:
+            registry = MediaProviderRegistry()
+            registry.register(DownloadableProvider())
+            storage = MediaStorage(
+                Path(directory),
+                executor=DownloadExecutor(status_code=500),
+            )
+            service = RenderService(registry, storage, store_output=True)
+            job = create_render_job()
+
+            with self.assertRaises(MediaStorageError):
+                service.render(job)
+
+            self.assertIs(job.status, RenderJobStatus.FAILED)
+            self.assertIsNone(job.result_asset)
+            self.assertIsNone(service.last_stored_asset)
+
+    def test_storage_mode_requires_explicit_storage(self) -> None:
+        """Storage cannot be enabled without a configured local store."""
+        with self.assertRaises(ValueError):
+            RenderService(MediaProviderRegistry(), store_output=True)
 
 
 if __name__ == "__main__":

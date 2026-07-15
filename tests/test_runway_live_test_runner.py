@@ -1,24 +1,34 @@
 """Tests for the guarded local Runway live-test runner."""
 
+import json
 import socket
 import unittest
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from decimal import Decimal
 from io import StringIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from engine.media.asset import MediaAsset
 from engine.media.providers.base import MediaProviderError
+from engine.media.storage import MediaStorage, MediaStorageError, StoredMediaAsset
 from integrations.runway.http_transport import HTTPExecutor, HTTPResponse
-from integrations.runway.models import RunwayGenerationRequest, RunwayTask
+from integrations.runway.models import (
+    RunwayGenerationMode,
+    RunwayGenerationRequest,
+    RunwayTask,
+)
 from scripts.run_runway_live_test import (
     RUNWAY_API_KEY_ENV,
+    RUNWAY_API_VERSION_ENV,
     estimate_runway_cost_usd,
     parse_args,
     run_guarded_live_test,
 )
 
-MODEL = "configured-test-model"
+MODEL = "gen4.5"
 SECRET = "synthetic-runway-test-key"
 PRICING = {MODEL: Decimal("0.10")}
 
@@ -49,6 +59,44 @@ class RecordingExecutorFactory:
         """Create one executor without performing a request."""
         self.calls += 1
         return NoNetworkExecutor()
+
+
+class SuccessfulRecordingExecutor:
+    """Record an HTTP request and return an immediate successful task."""
+
+    def __init__(self) -> None:
+        """Create an executor without recorded requests."""
+        self.calls: list[
+            tuple[str, str, Mapping[str, str], bytes | None]
+        ] = []
+
+    def execute(
+        self,
+        method: str,
+        url: str,
+        headers: Mapping[str, str],
+        body: bytes | None,
+        timeout_seconds: float,
+    ) -> HTTPResponse:
+        """Record create or download requests without network access."""
+        self.calls.append((method, url, dict(headers), body))
+        if method == "GET":
+            return HTTPResponse(
+                status_code=200,
+                headers={"Content-Type": "video/mp4"},
+                body=b"fake-runway-mp4",
+            )
+        return HTTPResponse(
+            status_code=200,
+            headers={"Content-Type": "application/json"},
+            body=json.dumps(
+                {
+                    "id": "runway-live-task-1",
+                    "status": "SUCCEEDED",
+                    "output": ["https://example.invalid/runway-live.mp4"],
+                },
+            ).encode("utf-8"),
+        )
 
 
 class FakeRunwayTransport:
@@ -120,6 +168,36 @@ class FakeSleeper:
         self.clock.current += seconds
 
 
+class FakeMediaStorage(MediaStorage):
+    """Store asset metadata without file or network access."""
+
+    def __init__(self) -> None:
+        """Create an empty recording store."""
+        self.download_calls: list[MediaAsset] = []
+
+    def download_asset(self, asset: MediaAsset) -> StoredMediaAsset:
+        """Record one asset and return deterministic storage metadata."""
+        self.download_calls.append(asset)
+        return StoredMediaAsset(
+            local_path=Path("output/videos/runway-live-task-1.mp4").resolve(),
+            size_bytes=24,
+            download_duration_seconds=0.25,
+            sha256="a" * 64,
+            mime_type="video/mp4",
+            created_at=datetime.now(UTC),
+            original_asset=asset,
+        )
+
+
+class FailingMediaStorage(FakeMediaStorage):
+    """Reject every attempted local download."""
+
+    def download_asset(self, asset: MediaAsset) -> StoredMediaAsset:
+        """Raise a safe storage error without exposing the source URL."""
+        del asset
+        raise MediaStorageError("local video storage failed")
+
+
 def runway_task(
     status: str,
     output_urls: tuple[str, ...] = (),
@@ -155,20 +233,31 @@ def live_args(
     return values
 
 
-def live_env(*, enabled: str = "true", api_key: str = SECRET) -> dict[str, str]:
+def live_env(
+    *,
+    enabled: str = "true",
+    api_key: str = SECRET,
+    price: str | None = None,
+    api_version: str | None = None,
+) -> dict[str, str]:
     """Return explicit fake live configuration."""
-    return {
+    env = {
         "HELIOS_RUNWAY_LIVE_ENABLED": enabled,
         RUNWAY_API_KEY_ENV: api_key,
         "HELIOS_MEDIA_RUNWAY_MODEL": MODEL,
     }
+    if price is not None:
+        env["HELIOS_MEDIA_RUNWAY_PRICE_PER_SECOND_USD"] = price
+    if api_version is not None:
+        env[RUNWAY_API_VERSION_ENV] = api_version
+    return env
 
 
 def invoke(
     argv: list[str],
     env: Mapping[str, str],
     transport: FakeRunwayTransport,
-    pricing: Mapping[str, Decimal] = PRICING,
+    pricing: Mapping[str, Decimal] | None = PRICING,
 ) -> tuple[int, str, str, RecordingExecutorFactory, FakeClock, FakeSleeper]:
     """Invoke the runner with fakes and captured terminal output."""
     stdout = StringIO()
@@ -182,6 +271,7 @@ def invoke(
         pricing_table=pricing,
         executor_factory=executor_factory,
         transport_factory=lambda executor: transport,
+        storage_factory=lambda executor: FakeMediaStorage(),
         clock=clock,
         sleeper=sleeper,
         stdout=stdout,
@@ -327,6 +417,181 @@ class RunwayLiveTestRunnerTestCase(unittest.TestCase):
         self.assertEqual(len(transport.create_calls), 1)
         self.assertEqual(sleeper.calls, [])
 
+    def test_live_runner_uses_gen45_text_endpoint_for_prompt_only(self) -> None:
+        """Pure Gen-4.5 prompts use text_to_video without promptImage."""
+        executor = SuccessfulRecordingExecutor()
+        stdout = StringIO()
+        stderr = StringIO()
+        clock = FakeClock()
+
+        code = run_guarded_live_test(
+            parse_args(live_args()),
+            env=live_env(),
+            pricing_table=PRICING,
+            executor_factory=lambda: executor,
+            storage_factory=lambda configured_executor: FakeMediaStorage(),
+            clock=clock,
+            sleeper=FakeSleeper(clock),
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(len(executor.calls), 1)
+        method, url, headers, body = executor.calls[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(
+            url,
+            "https://api.dev.runwayml.com/v1/text_to_video",
+        )
+        self.assertNotIn("image_to_video", url)
+        self.assertEqual(headers["X-Runway-Version"], "2024-11-06")
+        self.assertEqual(len(headers), 4)
+        decoded_body = json.loads(body or b"{}")
+        self.assertEqual(
+            decoded_body,
+            {
+                "duration": 5,
+                "model": MODEL,
+                "promptText": "A calm cinematic sunrise over a modern city",
+                "ratio": "1280:720",
+            },
+        )
+        self.assertIs(type(decoded_body["duration"]), int)
+        self.assertNotIn("promptImage", decoded_body)
+
+    def test_live_runner_downloads_completed_video_to_local_storage(self) -> None:
+        """A completed fake task is downloaded through the same HTTP executor."""
+        executor = SuccessfulRecordingExecutor()
+        stdout = StringIO()
+        stderr = StringIO()
+        clock = FakeClock()
+
+        with TemporaryDirectory() as directory:
+            output_directory = Path(directory) / "videos"
+            code = run_guarded_live_test(
+                parse_args(live_args()),
+                env=live_env(),
+                pricing_table=PRICING,
+                executor_factory=lambda: executor,
+                storage_factory=lambda configured_executor: MediaStorage(
+                    output_directory,
+                    executor=configured_executor,
+                ),
+                clock=clock,
+                sleeper=FakeSleeper(clock),
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            stored_path = output_directory / "runway-live-task-1.mp4"
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr.getvalue(), "")
+            self.assertEqual(len(executor.calls), 2)
+            self.assertEqual(executor.calls[1][0], "GET")
+            self.assertEqual(stored_path.read_bytes(), b"fake-runway-mp4")
+            self.assertIn(str(stored_path.resolve()), stdout.getvalue())
+            self.assertIn("Output stored successfully.", stdout.getvalue())
+            self.assertNotIn("https://example.invalid", stdout.getvalue())
+
+    def test_storage_failure_returns_error_without_false_success(self) -> None:
+        """A completed provider task is not reported successful if storage fails."""
+        transport = FakeRunwayTransport(
+            runway_task(
+                "SUCCEEDED",
+                ("https://example.invalid/private.mp4?token=signed",),
+            ),
+        )
+        stdout = StringIO()
+        stderr = StringIO()
+        factory = RecordingExecutorFactory()
+
+        code = run_guarded_live_test(
+            parse_args(live_args()),
+            env=live_env(),
+            pricing_table=PRICING,
+            executor_factory=factory,
+            transport_factory=lambda executor: transport,
+            storage_factory=lambda executor: FailingMediaStorage(),
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("Live Runway error", stderr.getvalue())
+        self.assertNotIn("Output stored successfully.", stdout.getvalue())
+        self.assertNotIn("example.invalid", stdout.getvalue())
+        self.assertNotIn("example.invalid", stderr.getvalue())
+
+    def test_live_runner_builds_text_to_video_request(self) -> None:
+        """The guarded runner labels prompt-only requests explicitly."""
+        transport = FakeRunwayTransport(
+            runway_task(
+                "SUCCEEDED",
+                ("https://example.invalid/runway-live.mp4",),
+            ),
+        )
+
+        code, _, _, _, _, _ = invoke(
+            live_args(),
+            live_env(),
+            transport,
+        )
+
+        self.assertEqual(code, 0)
+        generated_request = transport.create_calls[0]
+        self.assertIs(
+            generated_request.mode,
+            RunwayGenerationMode.TEXT_TO_VIDEO,
+        )
+        self.assertIsNone(generated_request.prompt_image)
+        self.assertIs(type(generated_request.duration_seconds), int)
+
+    def test_cli_whole_number_durations_create_integer_requests(self) -> None:
+        """Both 5 and 5.0 CLI spellings create an integer duration."""
+        for duration in ("5", "5.0"):
+            with self.subTest(duration=duration):
+                transport = FakeRunwayTransport(
+                    runway_task(
+                        "SUCCEEDED",
+                        ("https://example.invalid/runway-live.mp4",),
+                    ),
+                )
+                argv = live_args()
+                argv[argv.index("5")] = duration
+
+                code, _, _, _, _, _ = invoke(
+                    argv,
+                    live_env(),
+                    transport,
+                )
+
+                self.assertEqual(code, 0)
+                self.assertIs(
+                    type(transport.create_calls[0].duration_seconds),
+                    int,
+                )
+
+    def test_invalid_duration_is_blocked_before_executor_construction(self) -> None:
+        """Invalid durations never reach transport or executor construction."""
+        for duration in ("0", "5.5", "nan", "inf"):
+            with self.subTest(duration=duration):
+                transport = FakeRunwayTransport(runway_task("SUCCEEDED"))
+                argv = live_args()
+                argv[argv.index("5")] = duration
+
+                code, _, stderr, factory, _, _ = invoke(
+                    argv,
+                    live_env(),
+                    transport,
+                )
+
+                self.assertEqual(code, 1)
+                self.assertIn("duration_seconds", stderr)
+                self.assertEqual(factory.calls, 0)
+                self.assertEqual(transport.create_calls, [])
+
     def test_live_success_polls_existing_task(self) -> None:
         """One create call may be followed by controlled fake polling."""
         transport = FakeRunwayTransport(
@@ -354,7 +619,11 @@ class RunwayLiveTestRunnerTestCase(unittest.TestCase):
         self.assertEqual(sleeper.calls, [2.0])
         self.assertIn("Poll count: 2", stdout)
         self.assertIn("Elapsed seconds: 2.000", stdout)
-        self.assertIn("Output URL: https://example.invalid/runway-live.mp4", stdout)
+        self.assertIn("Output stored successfully.", stdout)
+        self.assertIn("Stored:", stdout)
+        self.assertIn("SHA256:", stdout)
+        self.assertIn("File size: 24 bytes", stdout)
+        self.assertNotIn("https://example.invalid", stdout)
         self.assertIn(f"Model: {MODEL}", stdout)
         self.assertIn("Duration: 5.0s", stdout)
         self.assertIn("Ratio: 1280:720", stdout)
@@ -397,6 +666,8 @@ class RunwayLiveTestRunnerTestCase(unittest.TestCase):
         self.assertNotIn(SECRET, stdout)
         self.assertNotIn(SECRET, stderr)
         self.assertIn("[REDACTED]", stdout)
+        self.assertNotIn("?token=", stdout)
+        self.assertIn("Output stored successfully.", stdout)
 
     def test_live_failure_does_not_create_second_generation(self) -> None:
         """A failed create call is never retried or replaced by a mock."""
@@ -415,8 +686,8 @@ class RunwayLiveTestRunnerTestCase(unittest.TestCase):
         self.assertEqual(len(transport.create_calls), 1)
         self.assertEqual(transport.get_calls, [])
 
-    def test_no_network_download_or_file_write_occurs(self) -> None:
-        """Successful fake live execution has no external side effects."""
+    def test_fake_live_storage_uses_no_external_side_effects(self) -> None:
+        """Injected test storage keeps fake live execution fully offline."""
         transport = FakeRunwayTransport(
             runway_task(
                 "SUCCEEDED",
@@ -448,6 +719,249 @@ class RunwayLiveTestRunnerTestCase(unittest.TestCase):
             estimate_runway_cost_usd("unknown", 5.0, PRICING)
         with self.assertRaises(ValueError):
             estimate_runway_cost_usd(MODEL, 5.0)
+
+
+class RunwayLiveReadinessTestCase(unittest.TestCase):
+    """Tests for the non-executing live-readiness audit mode."""
+
+    def test_complete_configuration_is_ready_without_execution(self) -> None:
+        """All explicit prerequisites produce READY without creating a task."""
+        transport = FakeRunwayTransport(runway_task("SUCCEEDED"))
+        argv = live_args(confirm=True)
+        argv.append("--check-live-readiness")
+
+        code, stdout, stderr, factory, _, sleeper = invoke(
+            argv,
+            live_env(price="0.10"),
+            transport,
+            pricing=None,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertIn("RUNWAY LIVE READINESS: READY", stdout)
+        self.assertIn(f"Model: {MODEL}", stdout)
+        self.assertIn("Duration: 5.0s", stdout)
+        self.assertIn("Ratio: 1280:720", stdout)
+        self.assertIn("Price per second: $0.100000", stdout)
+        self.assertIn("Estimated cost: $0.500000", stdout)
+        self.assertIn("Cost limit: $0.500000", stdout)
+        self.assertIn("Poll interval: 2.0s", stdout)
+        self.assertIn("Timeout: 300.0s", stdout)
+        self.assertIn("Maximum polls: 150", stdout)
+        self.assertIn("Live switch active: yes", stdout)
+        self.assertIn("API key present: yes", stdout)
+        self.assertIn("API version: 2024-11-06", stdout)
+        self.assertEqual(factory.calls, 0)
+        self.assertEqual(transport.create_calls, [])
+        self.assertEqual(transport.get_calls, [])
+        self.assertEqual(sleeper.calls, [])
+
+    def test_invalid_api_version_is_blocked_without_execution(self) -> None:
+        """Readiness rejects unknown versions before transport construction."""
+        transport = FakeRunwayTransport(runway_task("SUCCEEDED"))
+        argv = live_args(confirm=False)
+        argv.append("--check-live-readiness")
+
+        code, stdout, _, factory, _, _ = invoke(
+            argv,
+            live_env(price="0.10", api_version="2099-01-01"),
+            transport,
+            pricing=None,
+        )
+
+        self.assertEqual(code, 2)
+        self.assertIn("RUNWAY LIVE READINESS: BLOCKED", stdout)
+        self.assertIn("API version: 2099-01-01", stdout)
+        self.assertIn("Runway API version must be one of", stdout)
+        self.assertEqual(factory.calls, 0)
+        self.assertEqual(transport.create_calls, [])
+
+    def test_readiness_blocks_invalid_text_contract_values(self) -> None:
+        """Model, ratio and duration are validated without HTTP execution."""
+        cases = (
+            ("unsupported", "1280:720", "5"),
+            (MODEL, "768:1280", "5"),
+            (MODEL, "1280:720", "11"),
+        )
+        for model, ratio, duration in cases:
+            with self.subTest(model=model, ratio=ratio, duration=duration):
+                transport = FakeRunwayTransport(runway_task("SUCCEEDED"))
+                argv = live_args(confirm=False, model=model)
+                argv[argv.index("1280:720")] = ratio
+                argv[argv.index("5")] = duration
+                argv.append("--check-live-readiness")
+
+                code, stdout, _, factory, _, _ = invoke(
+                    argv,
+                    live_env(price="0.10"),
+                    transport,
+                    pricing=None,
+                )
+
+                self.assertEqual(code, 2)
+                self.assertIn("RUNWAY LIVE READINESS: BLOCKED", stdout)
+                self.assertEqual(factory.calls, 0)
+                self.assertEqual(transport.create_calls, [])
+
+    def test_readiness_uses_no_network_or_file_access(self) -> None:
+        """Readiness remains a pure validation path."""
+        transport = FakeRunwayTransport(runway_task("SUCCEEDED"))
+        argv = live_args(confirm=False)
+        argv.append("--check-live-readiness")
+
+        with (
+            patch.object(socket, "socket", side_effect=AssertionError("network")),
+            patch.object(Path, "open", side_effect=AssertionError("file")),
+            patch.object(Path, "write_bytes", side_effect=AssertionError("download")),
+        ):
+            code, _, _, factory, _, _ = invoke(
+                argv,
+                live_env(price="0.10"),
+                transport,
+                pricing=None,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(factory.calls, 0)
+        self.assertEqual(transport.create_calls, [])
+
+    def test_missing_api_key_is_blocked(self) -> None:
+        """Readiness reports absent credentials without exposing values."""
+        transport = FakeRunwayTransport(runway_task("SUCCEEDED"))
+        argv = live_args(confirm=False)
+        argv.append("--check-live-readiness")
+
+        code, stdout, stderr, factory, _, _ = invoke(
+            argv,
+            live_env(api_key="", price="0.10"),
+            transport,
+            pricing=None,
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stderr, "")
+        self.assertIn("RUNWAY LIVE READINESS: BLOCKED", stdout)
+        self.assertIn("API key present: no", stdout)
+        self.assertEqual(factory.calls, 0)
+
+    def test_inactive_live_switch_is_blocked(self) -> None:
+        """Readiness requires the independent environment switch."""
+        transport = FakeRunwayTransport(runway_task("SUCCEEDED"))
+        argv = live_args(confirm=False)
+        argv.append("--check-live-readiness")
+
+        code, stdout, _, factory, _, _ = invoke(
+            argv,
+            live_env(enabled="false", price="0.10"),
+            transport,
+            pricing=None,
+        )
+
+        self.assertEqual(code, 2)
+        self.assertIn("Live switch active: no", stdout)
+        self.assertIn("HELIOS_RUNWAY_LIVE_ENABLED must be true", stdout)
+        self.assertEqual(factory.calls, 0)
+
+    def test_missing_model_is_blocked(self) -> None:
+        """Readiness never infers a provider model."""
+        transport = FakeRunwayTransport(runway_task("SUCCEEDED"))
+        argv = [
+            "A calm cinematic sunrise over a modern city",
+            "--duration",
+            "5",
+            "--max-estimated-cost-usd",
+            "1.00",
+            "--check-live-readiness",
+        ]
+        env = live_env(price="0.10")
+        env.pop("HELIOS_MEDIA_RUNWAY_MODEL")
+
+        code, stdout, _, factory, _, _ = invoke(
+            argv,
+            env,
+            transport,
+            pricing=None,
+        )
+
+        self.assertEqual(code, 2)
+        self.assertIn("Model: not configured", stdout)
+        self.assertIn("Runway model is not configured", stdout)
+        self.assertEqual(factory.calls, 0)
+
+    def test_missing_or_invalid_local_price_is_blocked(self) -> None:
+        """Only finite positive environment pricing permits readiness."""
+        for price in (None, "0", "-0.1", "NaN", "Infinity", "invalid"):
+            with self.subTest(price=price):
+                transport = FakeRunwayTransport(runway_task("SUCCEEDED"))
+                argv = live_args(confirm=False)
+                argv.append("--check-live-readiness")
+
+                code, stdout, _, factory, _, _ = invoke(
+                    argv,
+                    live_env(price=price),
+                    transport,
+                    pricing=None,
+                )
+
+                self.assertEqual(code, 2)
+                self.assertIn("Price per second: not configured", stdout)
+                self.assertIn("no explicit pricing", stdout)
+                self.assertEqual(factory.calls, 0)
+
+    def test_missing_cost_limit_is_blocked(self) -> None:
+        """Readiness requires the same explicit cost ceiling as live mode."""
+        transport = FakeRunwayTransport(runway_task("SUCCEEDED"))
+        argv = live_args(confirm=False, cost_limit=None)
+        argv.append("--check-live-readiness")
+
+        code, stdout, _, factory, _, _ = invoke(
+            argv,
+            live_env(price="0.10"),
+            transport,
+            pricing=None,
+        )
+
+        self.assertEqual(code, 2)
+        self.assertIn("Cost limit: not configured", stdout)
+        self.assertIn("--max-estimated-cost-usd is required", stdout)
+        self.assertEqual(factory.calls, 0)
+
+    def test_estimated_cost_over_limit_is_blocked(self) -> None:
+        """Readiness applies the exact same decimal cost comparison."""
+        transport = FakeRunwayTransport(runway_task("SUCCEEDED"))
+        argv = live_args(confirm=False, cost_limit="0.49")
+        argv.append("--check-live-readiness")
+
+        code, stdout, _, factory, _, _ = invoke(
+            argv,
+            live_env(price="0.10"),
+            transport,
+            pricing=None,
+        )
+
+        self.assertEqual(code, 2)
+        self.assertIn("Estimated cost: $0.500000", stdout)
+        self.assertIn("exceeds limit", stdout)
+        self.assertEqual(factory.calls, 0)
+
+    def test_api_key_never_appears_in_readiness_output(self) -> None:
+        """Readiness reports only whether a credential exists."""
+        transport = FakeRunwayTransport(runway_task("SUCCEEDED"))
+        argv = live_args(confirm=False)
+        argv.append("--check-live-readiness")
+
+        code, stdout, stderr, _, _, _ = invoke(
+            argv,
+            live_env(price="0.10"),
+            transport,
+            pricing=None,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertNotIn(SECRET, stdout)
+        self.assertNotIn(SECRET, stderr)
+        self.assertIn("API key present: yes", stdout)
 
 
 if __name__ == "__main__":

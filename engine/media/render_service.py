@@ -4,14 +4,26 @@ from engine.media.asset import MediaAsset, MediaAssetType
 from engine.media.providers.base import MediaProvider, MediaProviderError
 from engine.media.providers.registry import MediaProviderRegistry
 from engine.media.render_job import RenderJob, RenderJobStatus
+from engine.media.storage import MediaStorage, StoredMediaAsset
 
 
 class RenderService:
     """Render jobs through explicitly registered media providers."""
 
-    def __init__(self, registry: MediaProviderRegistry) -> None:
+    def __init__(
+        self,
+        registry: MediaProviderRegistry,
+        storage: MediaStorage | None = None,
+        store_output: bool = False,
+    ) -> None:
         """Create a render service for a provider registry."""
+        if store_output and storage is None:
+            msg = "storage is required when store_output is enabled."
+            raise ValueError(msg)
         self.registry = registry
+        self.storage = storage
+        self.store_output = store_output
+        self.last_stored_asset: StoredMediaAsset | None = None
 
     def render(
         self,
@@ -22,6 +34,7 @@ class RenderService:
         self._validate_job(job)
         provider = self._select_provider(job, provider_id)
         self._validate_video_support(provider)
+        self.last_stored_asset = None
 
         job.start()
         try:
@@ -33,6 +46,14 @@ class RenderService:
             if asset.asset_type is not MediaAssetType.VIDEO:
                 msg = "media provider must return a VIDEO asset."
                 raise MediaProviderError(msg)
+
+            if self.store_output:
+                if self.storage is None:
+                    msg = "storage is required when store_output is enabled."
+                    raise RuntimeError(msg)
+                stored_asset = self.storage.download_asset(asset)
+                self._register_stored_asset(asset, stored_asset)
+                self.last_stored_asset = stored_asset
 
             job.complete(asset)
             return asset
@@ -76,3 +97,17 @@ class RenderService:
             job.fail(str(error))
         except Exception:
             return
+
+    def _register_stored_asset(
+        self,
+        asset: MediaAsset,
+        stored_asset: StoredMediaAsset,
+    ) -> None:
+        asset.metadata.update(
+            {
+                "local_path": str(stored_asset.local_path),
+                "size_bytes": stored_asset.size_bytes,
+                "sha256": stored_asset.sha256,
+                "mime_type": stored_asset.mime_type,
+            },
+        )

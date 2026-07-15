@@ -15,21 +15,27 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from engine.media.asset import MediaAsset, MediaAssetType  # noqa: E402
 from engine.media.providers.base import MediaProviderError  # noqa: E402
 from engine.media.providers.config import (  # noqa: E402
     ProviderConfig,
     load_provider_config,
     require_api_key,
 )
+from engine.media.storage import MediaStorage, StoredMediaAsset  # noqa: E402
 from integrations.runway.client import RunwayClient, RunwayTransport  # noqa: E402
 from integrations.runway.http_transport import (  # noqa: E402
     HTTPExecutor,
+    RUNWAY_API_VERSION,
     RunwayHTTPTransport,
     UrllibHTTPExecutor,
+    validate_runway_api_version,
 )
 from integrations.runway.models import (  # noqa: E402
     RunwayGenerationRequest,
+    RUNWAY_TEXT_TO_VIDEO_MODELS,
     RunwayTask,
+    validate_runway_text_to_video_contract,
 )
 from integrations.runway.polling import (  # noqa: E402
     Clock,
@@ -45,12 +51,14 @@ LIVE_ENABLED_ENV = "HELIOS_RUNWAY_LIVE_ENABLED"
 RUNWAY_API_KEY_ENV = "HELIOS_MEDIA_RUNWAY_API_KEY"
 RUNWAY_MODEL_ENV = "HELIOS_MEDIA_RUNWAY_MODEL"
 RUNWAY_PRICE_ENV = "HELIOS_MEDIA_RUNWAY_PRICE_PER_SECOND_USD"
+RUNWAY_API_VERSION_ENV = "HELIOS_MEDIA_RUNWAY_API_VERSION"
 _POLLING_STATUSES = {"PENDING", "THROTTLED", "RUNNING"}
 _FAILURE_STATUSES = {"FAILED", "CANCELED", "CANCELLED"}
 
 PricingTable = Mapping[str, Decimal]
 ExecutorFactory = Callable[[], HTTPExecutor]
 TransportFactory = Callable[[HTTPExecutor], RunwayTransport]
+StorageFactory = Callable[[HTTPExecutor], MediaStorage]
 
 
 @dataclass(frozen=True)
@@ -64,6 +72,11 @@ class RunwayLiveTestResult:
     duration_seconds: float
     ratio: str
     estimated_cost_usd: Decimal
+    stored_asset: StoredMediaAsset
+
+
+def _default_storage_factory(executor: HTTPExecutor) -> MediaStorage:
+    return MediaStorage(executor=executor)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -78,6 +91,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-estimated-cost-usd", type=float)
     parser.add_argument(
         "--confirm-live-runway-request",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--check-live-readiness",
         action="store_true",
     )
     parser.add_argument("--poll-interval", type=float, default=2.0)
@@ -107,6 +124,7 @@ def run_guarded_live_test(
     pricing_table: PricingTable | None = None,
     executor_factory: ExecutorFactory = UrllibHTTPExecutor,
     transport_factory: TransportFactory = RunwayHTTPTransport,
+    storage_factory: StorageFactory = _default_storage_factory,
     clock: Clock | None = None,
     sleeper: Sleeper | None = None,
     stdout: TextIO | None = None,
@@ -120,9 +138,6 @@ def run_guarded_live_test(
     try:
         prompt_text = _validate_text(args.prompt_text, "prompt_text")
         ratio = _validate_text(args.ratio, "ratio")
-        if not math.isfinite(args.duration) or args.duration <= 0:
-            msg = "duration must be greater than 0."
-            raise ValueError(msg)
         polling_config = RunwayPollingConfig(
             poll_interval_seconds=args.poll_interval,
             timeout_seconds=args.timeout,
@@ -130,6 +145,32 @@ def run_guarded_live_test(
         )
         provider_config = _load_runway_config(env)
         model = _resolve_model(args.model, provider_config)
+        api_version = env.get(RUNWAY_API_VERSION_ENV, RUNWAY_API_VERSION)
+        contract_errors: list[str] = []
+        try:
+            validate_runway_api_version(api_version)
+        except ValueError as error:
+            if not args.check_live_readiness:
+                raise
+            contract_errors.append(str(error))
+
+        request_duration: int | None = None
+        if model is not None and model not in RUNWAY_TEXT_TO_VIDEO_MODELS:
+            contract_errors.append(
+                f"model '{model}' is not supported for Runway text-to-video.",
+            )
+        elif model is not None:
+            try:
+                request_duration = validate_runway_text_to_video_contract(
+                    model,
+                    prompt_text,
+                    ratio,
+                    args.duration,
+                )
+            except ValueError as error:
+                if not args.check_live_readiness:
+                    raise
+                contract_errors.append(str(error))
         effective_pricing = (
             pricing_table
             if pricing_table is not None
@@ -140,12 +181,47 @@ def run_guarded_live_test(
             args.duration,
             effective_pricing,
         )
+        price_per_second = _configured_price(model, effective_pricing)
     except Exception as error:
         print(
             f"Error: {_sanitize_error(error, api_key)}",
             file=error_output,
         )
         return 1
+
+    blockers = _live_blockers(
+        args=args,
+        env=env,
+        api_key=api_key,
+        model=model,
+        estimated_cost=estimated_cost,
+        pricing_table=effective_pricing,
+        contract_errors=contract_errors,
+        require_confirmation=not args.check_live_readiness,
+    )
+    if args.check_live_readiness:
+        print(
+            _format_readiness(
+                ready=not blockers,
+                model=model,
+                duration_seconds=args.duration,
+                ratio=ratio,
+                price_per_second=price_per_second,
+                estimated_cost=estimated_cost,
+                max_cost=args.max_estimated_cost_usd,
+                polling_config=polling_config,
+                live_enabled=(
+                    env.get(LIVE_ENABLED_ENV, "").strip().lower() == "true"
+                ),
+                api_key_present=bool(api_key.strip()),
+                api_key=api_key,
+                api_version=api_version,
+            ),
+            file=output,
+        )
+        for blocker in blockers:
+            print(f"- {_redact_secret(blocker, api_key)}", file=output)
+        return 0 if not blockers else 2
 
     print(
         _format_safe_summary(
@@ -158,14 +234,6 @@ def run_guarded_live_test(
         ),
         file=output,
     )
-    blockers = _live_blockers(
-        args=args,
-        env=env,
-        api_key=api_key,
-        model=model,
-        estimated_cost=estimated_cost,
-        pricing_table=effective_pricing,
-    )
     if blockers:
         print("LIVE REQUEST DISABLED", file=output)
         for blocker in blockers:
@@ -175,6 +243,7 @@ def run_guarded_live_test(
     try:
         if (
             model is None
+            or request_duration is None
             or estimated_cost is None
             or args.max_estimated_cost_usd is None
         ):
@@ -187,13 +256,14 @@ def run_guarded_live_test(
         live_config = _config_with_model(provider_config, model)
         result = _execute_live_request(
             prompt_text=prompt_text,
-            duration_seconds=args.duration,
+            duration_seconds=request_duration,
             ratio=ratio,
             config=live_config,
             polling_config=polling_config,
             estimated_cost=estimated_cost,
             executor_factory=executor_factory,
             transport_factory=transport_factory,
+            storage_factory=storage_factory,
             clock=clock or SystemClock(),
             sleeper=sleeper or SystemSleeper(),
         )
@@ -219,13 +289,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _execute_live_request(
     prompt_text: str,
-    duration_seconds: float,
+    duration_seconds: int,
     ratio: str,
     config: ProviderConfig,
     polling_config: RunwayPollingConfig,
     estimated_cost: Decimal,
     executor_factory: ExecutorFactory,
     transport_factory: TransportFactory,
+    storage_factory: StorageFactory,
     clock: Clock,
     sleeper: Sleeper,
 ) -> RunwayLiveTestResult:
@@ -260,14 +331,35 @@ def _execute_live_request(
         )
         raise MediaProviderError(msg)
 
+    source_asset = _create_runway_media_asset(final_task, model)
+    stored_asset = storage_factory(executor).download_asset(source_asset)
+
     return RunwayLiveTestResult(
         task=final_task,
         poll_count=polling_result.poll_count,
         elapsed_seconds=polling_result.elapsed_seconds,
         model=model,
-        duration_seconds=duration_seconds,
+        duration_seconds=float(duration_seconds),
         ratio=ratio,
         estimated_cost_usd=estimated_cost,
+        stored_asset=stored_asset,
+    )
+
+
+def _create_runway_media_asset(task: RunwayTask, model: str) -> MediaAsset:
+    return MediaAsset(
+        asset_id=task.task_id,
+        asset_type=MediaAssetType.VIDEO,
+        name=f"Runway video {task.task_id}",
+        description="Completed guarded Runway video generation.",
+        provider="runway",
+        format="mp4",
+        metadata={
+            "runway_task_id": task.task_id,
+            "output_url": task.output_urls[0],
+            "output_url_is_temporary": True,
+            "model": model,
+        },
     )
 
 
@@ -295,9 +387,12 @@ def _live_blockers(
     model: str | None,
     estimated_cost: Decimal | None,
     pricing_table: PricingTable,
+    contract_errors: list[str],
+    require_confirmation: bool = True,
 ) -> list[str]:
     blockers: list[str] = []
-    if not args.confirm_live_runway_request:
+    blockers.extend(contract_errors)
+    if require_confirmation and not args.confirm_live_runway_request:
         blockers.append("missing --confirm-live-runway-request")
     if env.get(LIVE_ENABLED_ENV, "").strip().lower() != "true":
         blockers.append(f"{LIVE_ENABLED_ENV} must be true")
@@ -383,13 +478,22 @@ def _try_estimate_cost(
     duration_seconds: float,
     pricing_table: PricingTable,
 ) -> Decimal | None:
+    price = _configured_price(model, pricing_table)
+    if model is None or price is None:
+        return None
+    return price * Decimal(str(duration_seconds))
+
+
+def _configured_price(
+    model: str | None,
+    pricing_table: PricingTable,
+) -> Decimal | None:
     if model is None or model not in pricing_table:
         return None
-    return _estimate_runway_cost_decimal(
-        model,
-        duration_seconds,
-        pricing_table,
-    )
+    price = pricing_table[model]
+    if not price.is_finite() or price <= 0:
+        return None
+    return price
 
 
 def _estimate_runway_cost_decimal(
@@ -440,7 +544,10 @@ def _format_live_result(result: RunwayLiveTestResult, api_key: str) -> str:
             f"Final status: {result.task.status.upper()}",
             f"Poll count: {result.poll_count}",
             f"Elapsed seconds: {result.elapsed_seconds:.3f}",
-            f"Output URL: {_redact_secret(result.task.output_urls[0], api_key)}",
+            "Output stored successfully.",
+            f"Stored: {result.stored_asset.local_path}",
+            f"SHA256: {result.stored_asset.sha256}",
+            f"File size: {result.stored_asset.size_bytes} bytes",
             f"Model: {_redact_secret(result.model, api_key)}",
             f"Duration: {result.duration_seconds}s",
             f"Ratio: {_redact_secret(result.ratio, api_key)}",
@@ -451,6 +558,53 @@ def _format_live_result(result: RunwayLiveTestResult, api_key: str) -> str:
 
 def _format_usd(value: Decimal) -> str:
     return f"${value:.6f}"
+
+
+def _format_readiness(
+    ready: bool,
+    model: str | None,
+    duration_seconds: float,
+    ratio: str,
+    price_per_second: Decimal | None,
+    estimated_cost: Decimal | None,
+    max_cost: float | None,
+    polling_config: RunwayPollingConfig,
+    live_enabled: bool,
+    api_key_present: bool,
+    api_key: str,
+    api_version: str,
+) -> str:
+    readiness = "READY" if ready else "BLOCKED"
+    price = (
+        "not configured"
+        if price_per_second is None
+        else _format_usd(price_per_second)
+    )
+    estimate = (
+        "not available" if estimated_cost is None else _format_usd(estimated_cost)
+    )
+    limit = (
+        "not configured"
+        if max_cost is None or not math.isfinite(max_cost)
+        else _format_usd(Decimal(str(max_cost)))
+    )
+    return "\n".join(
+        [
+            f"RUNWAY LIVE READINESS: {readiness}",
+            f"Model: {_redact_secret(model or 'not configured', api_key)}",
+            f"Duration: {duration_seconds}s",
+            f"Ratio: {_redact_secret(ratio, api_key)}",
+            f"Price per second: {price}",
+            f"Estimated cost: {estimate}",
+            f"Cost limit: {limit}",
+            f"Poll interval: {polling_config.poll_interval_seconds}s",
+            f"Timeout: {polling_config.timeout_seconds}s",
+            f"Maximum polls: {polling_config.max_polls}",
+            f"Live switch active: {'yes' if live_enabled else 'no'}",
+            f"API key present: {'yes' if api_key_present else 'no'}",
+            f"API version: {_redact_secret(api_version, api_key)}",
+        ],
+    )
 
 
 def _sanitize_error(error: Exception, api_key: str) -> str:
