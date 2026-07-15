@@ -31,6 +31,13 @@ Die Demo verwendet keine APIs, keine echten LLMs und kein echtes Rendering. Als
 Ergebnis entstehen ein providerneutraler `RenderJob` und ein lokaler
 Markdown-Report im Verzeichnis `output/`.
 
+## Media Provider Configuration
+
+Zukünftige Media-Provider werden über `HELIOS_MEDIA_*`-Environment-Variablen
+konfiguriert. Secrets dürfen nicht committed werden; `.env.example` dient
+ausschließlich als Vorlage mit leeren Platzhaltern. Aktuell existieren nur
+lokale Mock-Provider und es ist noch keine echte Provider-API aktiv.
+
 ## Development Workflow
 
 Die verbindlichen Codex-Projektregeln stehen in [AGENTS.md](AGENTS.md).
