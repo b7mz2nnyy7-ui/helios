@@ -4,14 +4,20 @@ import argparse
 import re
 import sys
 import unicodedata
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from engine.media.asset import MediaAsset, MediaAssetType  # noqa: E402
+from engine.media.providers.mock_provider import MockVideoProvider  # noqa: E402
+from engine.media.providers.registry import MediaProviderRegistry  # noqa: E402
+from engine.media.render_job import RenderJobStatus  # noqa: E402
+from engine.media.render_service import RenderService  # noqa: E402
 from engine.runtime.runtime import HeliosRuntime  # noqa: E402
 from workflows.content_pipeline import ContentPipeline  # noqa: E402
 from workflows.models import ContentPipelineResult  # noqa: E402
@@ -26,12 +32,24 @@ class ContentPipelineDemoResult:
     target_age_range: str
     target_duration_seconds: float
     markdown_path: Path
+    rendered_asset: MediaAsset | None = None
 
 
-DemoRunner = Callable[
-    [str, str, str, float, Path],
-    ContentPipelineDemoResult,
-]
+class DemoRunner(Protocol):
+    """Callable contract for an injectable content pipeline demo runner."""
+
+    def __call__(
+        self,
+        query: str,
+        language: str,
+        target_age_range: str,
+        target_duration_seconds: float,
+        output_dir: Path,
+        *,
+        render: bool = False,
+        render_provider: str = "mock-video",
+    ) -> ContentPipelineDemoResult:
+        """Run a local pipeline demo with optional mock rendering."""
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -58,10 +76,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=Path("./output"),
         help="Directory for the generated Markdown report.",
     )
+    parser.add_argument(
+        "--render",
+        action="store_true",
+        help="Complete the render job through the local mock provider.",
+    )
+    parser.add_argument(
+        "--render-provider",
+        default="mock-video",
+        help="Registered media provider used with --render.",
+    )
     args = parser.parse_args(argv)
     args.query = _validate_text(args.query, "query")
     args.language = _validate_text(args.language, "language")
     args.age_range = _validate_text(args.age_range, "age_range")
+    args.render_provider = _validate_text(args.render_provider, "render_provider")
     if args.duration <= 0:
         msg = "duration must be greater than 0."
         raise ValueError(msg)
@@ -108,6 +137,9 @@ def run_demo(
     target_duration_seconds: float = 30.0,
     output_dir: Path = Path("./output"),
     pipeline: ContentPipeline | None = None,
+    render: bool = False,
+    render_provider: str = "mock-video",
+    render_service: RenderService | None = None,
 ) -> ContentPipelineDemoResult:
     """Run the existing content pipeline and persist its Markdown report."""
     clean_query = _validate_text(query, "query")
@@ -124,6 +156,13 @@ def run_demo(
         target_age_range=clean_age_range,
         target_duration_seconds=target_duration_seconds,
     )
+    rendered_asset = None
+    if render:
+        rendered_asset = render_pipeline_result(
+            pipeline_result,
+            provider_id=_validate_text(render_provider, "render_provider"),
+            render_service=render_service,
+        )
 
     directory = output_dir.expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=True)
@@ -133,6 +172,7 @@ def run_demo(
         language=clean_language,
         target_age_range=clean_age_range,
         target_duration_seconds=target_duration_seconds,
+        rendered_asset=rendered_asset,
     )
     markdown_path.write_text(markdown, encoding="utf-8")
 
@@ -142,7 +182,38 @@ def run_demo(
         target_age_range=clean_age_range,
         target_duration_seconds=target_duration_seconds,
         markdown_path=markdown_path,
+        rendered_asset=rendered_asset,
     )
+
+
+def build_render_service() -> RenderService:
+    """Create an isolated render service with the local mock provider."""
+    registry = MediaProviderRegistry()
+    registry.register(MockVideoProvider())
+    return RenderService(registry)
+
+
+def render_pipeline_result(
+    result: ContentPipelineResult,
+    provider_id: str = "mock-video",
+    render_service: RenderService | None = None,
+) -> MediaAsset:
+    """Render a pipeline result and verify its completed video asset."""
+    service = render_service or build_render_service()
+    asset = service.render(result.render_job, provider_id=provider_id)
+    if result.render_job.status is not RenderJobStatus.COMPLETED:
+        msg = "render job must be COMPLETED after rendering."
+        raise RuntimeError(msg)
+
+    if asset.asset_type is not MediaAssetType.VIDEO:
+        msg = "rendered asset must be a VIDEO asset."
+        raise RuntimeError(msg)
+
+    if result.render_job.result_asset is not asset:
+        msg = "rendered asset must be stored on the render job."
+        raise RuntimeError(msg)
+
+    return asset
 
 
 def format_markdown(
@@ -150,6 +221,7 @@ def format_markdown(
     language: str,
     target_age_range: str,
     target_duration_seconds: float,
+    rendered_asset: MediaAsset | None = None,
 ) -> str:
     """Format a complete pipeline result as a readable Markdown report."""
     task_ids = "\n".join(f"- {task_id}" for task_id in result.completed_task_ids)
@@ -187,29 +259,82 @@ def format_markdown(
             f"- RenderJob Status: {render_job.status.value}"
         ),
         _section("VideoProductionPlan", render_job.plan.to_markdown()),
+        format_render_result(render_job.status, rendered_asset),
     ]
     return "\n\n".join(sections) + "\n"
+
+
+def format_render_result(
+    render_job_status: RenderJobStatus,
+    asset: MediaAsset | None,
+) -> str:
+    """Format the optional render result for the Markdown report."""
+    if asset is None:
+        return "# Render Result\n\nRender not executed"
+
+    metadata_keys = (
+        "render_job_id",
+        "plan_id",
+        "target_platform",
+        "total_duration_seconds",
+        "scene_count",
+    )
+    metadata = "\n".join(
+        f"  - {key}: {asset.metadata[key]}" for key in metadata_keys
+    )
+    return (
+        "# Render Result\n\n"
+        f"- RenderJob Status: {render_job_status.value}\n"
+        f"- Provider: {asset.provider}\n"
+        f"- Asset ID: {asset.asset_id}\n"
+        f"- Asset Type: {asset.asset_type.value}\n"
+        f"- Asset Format: {asset.format}\n"
+        f"- Asset Name: {asset.name}\n"
+        f"- Asset Description: {asset.description}\n"
+        f"- Metadata:\n{metadata}"
+    )
 
 
 def format_summary(result: ContentPipelineDemoResult) -> str:
     """Format the compact terminal summary for a successful run."""
     pipeline_result = result.pipeline_result
     render_job = pipeline_result.render_job
-    return "\n".join(
-        [
-            f"Query: {pipeline_result.query}",
-            "Status: COMPLETED",
-            f"Abgeschlossene Tasks: {len(pipeline_result.completed_task_ids)}",
-            f"Script-Titel: {pipeline_result.video_script.title}",
-            f"Ausgewählter Hook: {pipeline_result.optimized_hook.selected_hook.text}",
-            f"Storyboard-Szenen: {len(pipeline_result.storyboard.scenes)}",
-            f"Zielplattform: {render_job.plan.target_platform}",
-            f"Gesamtdauer: {render_job.plan.total_duration_seconds}s",
-            f"RenderJob-ID: {render_job.job_id}",
-            f"RenderJob-Status: {render_job.status.value}",
-            f"Markdown-Datei: {result.markdown_path}",
-        ],
-    )
+    summary_lines = [
+        f"Query: {pipeline_result.query}",
+        (
+            "Pipeline-Status: COMPLETED"
+            if result.rendered_asset is not None
+            else "Status: COMPLETED"
+        ),
+        f"Abgeschlossene Tasks: {len(pipeline_result.completed_task_ids)}",
+        f"Script-Titel: {pipeline_result.video_script.title}",
+        f"Ausgewählter Hook: {pipeline_result.optimized_hook.selected_hook.text}",
+        f"Storyboard-Szenen: {len(pipeline_result.storyboard.scenes)}",
+        f"Zielplattform: {render_job.plan.target_platform}",
+        f"Gesamtdauer: {render_job.plan.total_duration_seconds}s",
+        f"RenderJob-ID: {render_job.job_id}",
+        f"RenderJob-Status: {render_job.status.value}",
+    ]
+    if result.rendered_asset is not None:
+        summary_lines.extend(
+            format_render_summary(pipeline_result, result.rendered_asset),
+        )
+    summary_lines.append(f"Markdown-Datei: {result.markdown_path}")
+    return "\n".join(summary_lines)
+
+
+def format_render_summary(
+    result: ContentPipelineResult,
+    asset: MediaAsset,
+) -> list[str]:
+    """Return terminal summary lines for a completed mock render."""
+    return [
+        f"Provider: {asset.provider}",
+        f"Asset-ID: {asset.asset_id}",
+        f"Asset-Typ: {asset.asset_type.value}",
+        f"Asset-Format: {asset.format}",
+        f"Szenenanzahl: {len(result.render_job.plan.scenes)}",
+    ]
 
 
 def main(
@@ -226,13 +351,24 @@ def main(
         return 1
 
     try:
-        result = runner(
-            args.query,
-            args.language,
-            args.age_range,
-            args.duration,
-            args.output_dir,
-        )
+        if args.render:
+            result = runner(
+                args.query,
+                args.language,
+                args.age_range,
+                args.duration,
+                args.output_dir,
+                render=True,
+                render_provider=args.render_provider,
+            )
+        else:
+            result = runner(
+                args.query,
+                args.language,
+                args.age_range,
+                args.duration,
+                args.output_dir,
+            )
     except Exception as error:
         print(f"Fehler: {error}", file=sys.stderr)
         return 1
