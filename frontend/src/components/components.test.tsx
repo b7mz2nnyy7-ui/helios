@@ -6,7 +6,13 @@ import { AppShell } from "./AppShell";
 import { EmptyState } from "./EmptyState";
 import { ErrorState } from "./ErrorState";
 import { LoadingScreen } from "./LoadingScreen";
-import { MissionStatusPanel, MissionStudio } from "./MissionStudio";
+import {
+  MissionDetail,
+  MissionList,
+  MissionStatusPanel,
+  MissionStudio,
+} from "./MissionStudio";
+import { PublishingOverview } from "./PublishingPage";
 import { VideoCard } from "./VideoCard";
 import { VideoPlayerModal } from "./VideoPlayerModal";
 import { SystemReportView } from "./SystemPage";
@@ -35,6 +41,16 @@ const completedMission: Mission = {
   updated_at: "2026-07-16T10:01:00Z",
   video_id: "video-1",
   render_job_id: "render-1",
+  render_status: "COMPLETED",
+  media_asset: {
+    asset_id: "asset-1",
+    asset_type: "VIDEO",
+    name: "AI Agents",
+    description: "Rendered production",
+    provider: "mock-video",
+    format: "mp4",
+    metadata: { scene_count: 4 },
+  },
   pipeline_state: {
     current_stage: "Completed",
     completed_stages: ["Research", "Script", "Storyboard", "Rendering", "Download"],
@@ -74,6 +90,7 @@ describe("video interface components", () => {
     expect(markup).toContain('href="/system"');
     expect(markup).toContain('href="/missions"');
     expect(markup).toContain('href="/agents" aria-current="page"');
+    expect(markup).toContain('href="/publishing"');
     expect(markup).toContain('href="/settings"');
   });
 
@@ -188,6 +205,55 @@ describe("video interface components", () => {
     expect(failedMarkup).toContain("Mission execution failed.");
     expect(failedMarkup).toContain("Retry · Coming soon");
     expect(failedMarkup).toContain("disabled");
+  });
+
+  it("renders mission history filters and persisted render state", () => {
+    const markup = renderToStaticMarkup(
+      <MissionList
+        missions={[completedMission]}
+        selectedMissionId={completedMission.id}
+        statusFilter="ALL"
+        onFilterChange={() => undefined}
+        onSelect={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain("Filter missions");
+    expect(markup).toContain("Running");
+    expect(markup).toContain("Completed");
+    expect(markup).toContain("Failed");
+    expect(markup).toContain("Queued");
+    expect(markup).toContain("Render");
+    expect(markup).toContain("Available");
+  });
+
+  it("renders mission detail, asset metadata, and publishing state", () => {
+    const markup = renderToStaticMarkup(
+      <MissionDetail
+        mission={completedMission}
+        onWatchVideo={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain("Mission detail");
+    expect(markup).toContain("Pipeline");
+    expect(markup).toContain("render-1");
+    expect(markup).toContain("asset-1");
+    expect(markup).toContain("mock-video");
+    expect(markup).toContain("No publishing targets connected");
+    expect(markup).toContain("Watch Video");
+  });
+
+  it("renders publishing foundation without fabricated connections", () => {
+    const markup = renderToStaticMarkup(
+      <PublishingOverview missions={[completedMission]} />,
+    );
+
+    expect(markup).toContain("Publishing");
+    expect(markup).toContain("Connected platforms");
+    expect(markup).toContain("No publishing targets connected");
+    expect(markup).toContain("AI Agents");
+    expect(markup).toContain("No publishing jobs queued.");
   });
 
   it("renders the typed local agent catalog", () => {

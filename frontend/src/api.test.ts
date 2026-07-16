@@ -23,6 +23,8 @@ const mission: Mission = {
   updated_at: "2026-07-16T10:00:01Z",
   video_id: null,
   render_job_id: null,
+  render_status: null,
+  media_asset: null,
   pipeline_state: {
     current_stage: "Research",
     completed_stages: [],

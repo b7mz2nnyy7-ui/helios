@@ -10,6 +10,7 @@ from apps.api.models import (
     ContentPipelineResponse,
     HealthResponse,
     MissionCreateRequest,
+    MissionMediaAssetResponse,
     MissionPipelineStateResponse,
     MissionResponse,
     SystemHealthResponse,
@@ -17,7 +18,10 @@ from apps.api.models import (
     VideoSummaryResponse,
 )
 from apps.api.mission_models import Mission
-from apps.api.mission_repository import MissionRepository
+from apps.api.mission_repository import (
+    DEFAULT_MISSION_REPOSITORY_PATH,
+    MissionRepository,
+)
 from apps.api.mission_service import MissionService
 from apps.api.service import ContentPipelineService
 from apps.api.video_streaming import ByteRange, iter_file_range, parse_range_header
@@ -41,7 +45,11 @@ def create_app(
     selected_service_factory = service_factory or ContentPipelineService
     selected_scanner_factory = scanner_factory or MediaStorageScanner
     selected_guardian_factory = guardian_factory or create_guardian
-    selected_mission_repository = mission_repository or MissionRepository()
+    selected_mission_repository = (
+        mission_repository
+        if mission_repository is not None
+        else MissionRepository(DEFAULT_MISSION_REPOSITORY_PATH)
+    )
     selected_mission_service_factory = mission_service_factory or MissionService
     mission_service = selected_mission_service_factory(selected_mission_repository)
     api = FastAPI(title="Helios Local API", version="1.0.0")
@@ -216,6 +224,20 @@ def _mission_response(mission: Mission) -> MissionResponse:
         updated_at=mission.updated_at,
         video_id=mission.video_id,
         render_job_id=mission.render_job_id,
+        render_status=mission.render_status,
+        media_asset=(
+            None
+            if mission.media_asset is None
+            else MissionMediaAssetResponse(
+                asset_id=mission.media_asset.asset_id,
+                asset_type=mission.media_asset.asset_type,
+                name=mission.media_asset.name,
+                description=mission.media_asset.description,
+                provider=mission.media_asset.provider,
+                format=mission.media_asset.format,
+                metadata=dict(mission.media_asset.metadata),
+            )
+        ),
         pipeline_state=MissionPipelineStateResponse(
             current_stage=state.current_stage.value,
             completed_stages=[stage.value for stage in state.completed_stages],

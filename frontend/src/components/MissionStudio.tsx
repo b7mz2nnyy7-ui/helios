@@ -8,6 +8,7 @@ import type {
   MissionDuration,
   MissionPlatform,
   MissionStage,
+  MissionStatus,
 } from "../types";
 
 interface MissionStudioProps {
@@ -42,6 +43,7 @@ export function MissionStudio({
   const [selectedMission, setSelectedMission] = useState<Mission | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<MissionStatus | "ALL">("ALL");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -168,28 +170,169 @@ export function MissionStudio({
       </form>
 
       {selectedMission ? (
-        <MissionStatusPanel mission={selectedMission} onWatchVideo={onWatchVideo} />
+        <>
+          <MissionStatusPanel mission={selectedMission} onWatchVideo={onWatchVideo} />
+          <MissionDetail mission={selectedMission} onWatchVideo={onWatchVideo} />
+        </>
       ) : null}
 
-      {missions.length > 0 ? (
-        <section className="mt-16 border-t border-[#d9dbd5] pt-8">
-          <h2 className="text-lg font-semibold text-[#1b1e1a]">Recent missions</h2>
-          <div className="mt-4 divide-y divide-[#e0e2dc] border-y border-[#d9dbd5]">
-            {missions.map((mission) => (
-              <button
-                className="grid w-full gap-2 py-4 text-left sm:grid-cols-[1fr_auto_auto] sm:items-center sm:gap-6"
-                type="button"
-                key={mission.id}
-                onClick={() => setSelectedMission(mission)}
-              >
-                <span className="truncate text-sm font-medium text-[#242724]">{mission.title}</span>
-                <span className="text-xs text-[#6c726b]">{mission.platform}</span>
-                <span className="text-xs font-semibold text-[#315c45]">{mission.status}</span>
-              </button>
-            ))}
-          </div>
-        </section>
+      <MissionList
+        missions={missions}
+        selectedMissionId={selectedMission?.id ?? null}
+        statusFilter={statusFilter}
+        onFilterChange={setStatusFilter}
+        onSelect={setSelectedMission}
+      />
+    </div>
+  );
+}
+
+export function MissionList({
+  missions,
+  selectedMissionId,
+  statusFilter,
+  onFilterChange,
+  onSelect,
+}: {
+  missions: Mission[];
+  selectedMissionId: string | null;
+  statusFilter: MissionStatus | "ALL";
+  onFilterChange: (status: MissionStatus | "ALL") => void;
+  onSelect: (mission: Mission) => void;
+}) {
+  const filters: ReadonlyArray<MissionStatus | "ALL"> = [
+    "ALL",
+    "RUNNING",
+    "COMPLETED",
+    "FAILED",
+    "QUEUED",
+  ];
+  const filtered = missions.filter(
+    (mission) => statusFilter === "ALL" || mission.status === statusFilter,
+  );
+  return (
+    <section className="mt-16 border-t border-[#d9dbd5] pt-8">
+      <div className="flex flex-wrap items-end justify-between gap-5">
+        <div>
+          <p className="text-xs font-semibold uppercase text-[#617066]">History</p>
+          <h2 className="mt-2 text-xl font-semibold text-[#1b1e1a]">Missions</h2>
+        </div>
+        <div className="flex flex-wrap gap-1" aria-label="Filter missions">
+          {filters.map((filter) => (
+            <button
+              className={`rounded px-3 py-1.5 text-xs font-semibold transition ${
+                filter === statusFilter
+                  ? "bg-[#253129] text-white"
+                  : "bg-[#eceeea] text-[#626861] hover:bg-[#dfe3dd]"
+              }`}
+              type="button"
+              key={filter}
+              aria-pressed={filter === statusFilter}
+              onClick={() => onFilterChange(filter)}
+            >
+              {filter === "ALL" ? "All" : titleCase(filter)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-5 overflow-hidden rounded-lg border border-[#dcddd8] bg-white">
+        <div className="hidden grid-cols-[1.5fr_0.7fr_0.8fr_0.9fr_0.8fr_0.6fr] border-b border-[#e3e4df] px-5 py-3 text-xs font-semibold uppercase text-[#737970] lg:grid">
+          <span>Title</span>
+          <span>Status</span>
+          <span>Platform</span>
+          <span>Created</span>
+          <span>Render</span>
+          <span>Video</span>
+        </div>
+        {filtered.map((mission) => (
+          <button
+            className={`grid w-full gap-2 border-b border-[#e7e8e3] px-5 py-4 text-left last:border-b-0 lg:grid-cols-[1.5fr_0.7fr_0.8fr_0.9fr_0.8fr_0.6fr] lg:items-center ${
+              mission.id === selectedMissionId ? "bg-[#f1f4f0]" : "hover:bg-[#f8f9f7]"
+            }`}
+            type="button"
+            key={mission.id}
+            onClick={() => onSelect(mission)}
+          >
+            <span className="truncate text-sm font-medium text-[#242724]">{mission.title}</span>
+            <span className="text-xs font-semibold text-[#315c45]">{mission.status}</span>
+            <span className="text-xs text-[#656b64]">{mission.platform}</span>
+            <span className="text-xs text-[#656b64]">{formatTimestamp(mission.created_at)}</span>
+            <span className="text-xs text-[#656b64]">{mission.render_status ?? "Not started"}</span>
+            <span className="text-xs text-[#656b64]">{mission.video_id ? "Available" : "No"}</span>
+          </button>
+        ))}
+        {filtered.length === 0 ? (
+          <p className="px-5 py-10 text-center text-sm text-[#6b7069]">
+            No missions match this filter.
+          </p>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+export function MissionDetail({
+  mission,
+  onWatchVideo,
+}: {
+  mission: Mission;
+  onWatchVideo: (videoId: string) => void;
+}) {
+  const asset = mission.media_asset;
+  return (
+    <section className="mt-12 border-t border-[#d9dbd5] pt-8" aria-label="Mission detail">
+      <h2 className="text-xl font-semibold text-[#1b1e1a]">Mission detail</h2>
+      <div className="mt-6 grid gap-x-10 gap-y-7 lg:grid-cols-2">
+        <DetailField label="Prompt" value={mission.prompt} />
+        <DetailField label="Pipeline" value={`${mission.pipeline_state.current_stage} · ${mission.pipeline_state.completed_task_ids.length} tasks completed`} />
+        <DetailField label="Render" value={`${mission.render_status ?? "Not started"}${mission.render_job_id ? ` · ${mission.render_job_id}` : ""}`} />
+        <DetailField label="Video" value={mission.video_id ?? "No video available"} />
+        <DetailField label="Created" value={formatTimestamp(mission.created_at)} />
+        <DetailField label="Updated" value={formatTimestamp(mission.updated_at)} />
+        <DetailField label="Platform" value={mission.platform} />
+        <DetailField label="Model" value={mission.render_model} />
+      </div>
+
+      <div className="mt-10 border-t border-[#e1e2dd] pt-7">
+        <h3 className="text-sm font-semibold text-[#252824]">Asset</h3>
+        {asset ? (
+          <dl className="mt-4 grid gap-x-10 gap-y-5 sm:grid-cols-2">
+            <DetailField label="Asset ID" value={asset.asset_id} />
+            <DetailField label="Provider" value={asset.provider} />
+            <DetailField label="Format" value={asset.format} />
+            <DetailField label="Type" value={asset.asset_type} />
+            <DetailField label="Name" value={asset.name} />
+            <DetailField label="Metadata" value={JSON.stringify(asset.metadata)} />
+          </dl>
+        ) : (
+          <p className="mt-3 text-sm text-[#6b7069]">No media asset created yet.</p>
+        )}
+      </div>
+
+      <div className="mt-10 border-t border-[#e1e2dd] pt-7">
+        <h3 className="text-sm font-semibold text-[#252824]">Publishing</h3>
+        <p className="mt-3 text-sm text-[#6b7069]">No publishing targets connected</p>
+      </div>
+
+      {mission.video_id ? (
+        <button
+          className="mt-8 rounded-md bg-[#171916] px-5 py-2.5 text-sm font-semibold text-white"
+          type="button"
+          onClick={() => onWatchVideo(mission.video_id as string)}
+        >
+          Watch Video
+        </button>
       ) : null}
+    </section>
+  );
+}
+
+function DetailField({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt className="text-xs font-semibold uppercase text-[#777d75]">{label}</dt>
+      <dd className="mt-2 break-words text-sm leading-6 text-[#343834]">{value}</dd>
     </div>
   );
 }
@@ -294,4 +437,19 @@ function SegmentedField({
 
 function upsertMission(missions: Mission[], mission: Mission): Mission[] {
   return [mission, ...missions.filter((item) => item.id !== mission.id)];
+}
+
+function titleCase(value: string): string {
+  return value.charAt(0) + value.slice(1).toLowerCase();
+}
+
+function formatTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Unknown";
+  }
+  return new Intl.DateTimeFormat("en", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
 }

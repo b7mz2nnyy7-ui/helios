@@ -18,6 +18,13 @@ describe("Helios frontend routes", () => {
     expect(markup).toContain(`href="${pathname}" aria-current="page"`);
   });
 
+  it("loads the publishing route directly with its active navigation", () => {
+    const markup = renderToStaticMarkup(<App pathname="/publishing" />);
+
+    expect(markup).toContain("Starting Helios");
+    expect(markup).toContain('href="/publishing" aria-current="page"');
+  });
+
   it("resolves every supported direct path and preserves it after reload", () => {
     for (const route of appRoutes) {
       expect(resolveRoute(route.path)).toBe(route);

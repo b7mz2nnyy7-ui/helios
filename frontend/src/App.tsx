@@ -7,6 +7,7 @@ import { EmptyState } from "./components/EmptyState";
 import { ErrorState } from "./components/ErrorState";
 import { LoadingScreen } from "./components/LoadingScreen";
 import { MissionStudio } from "./components/MissionStudio";
+import { PublishingPage } from "./components/PublishingPage";
 import { SystemPage } from "./components/SystemPage";
 import { VideoCard } from "./components/VideoCard";
 import { VideoPlayerModal } from "./components/VideoPlayerModal";
@@ -118,6 +119,20 @@ export default function App({ pathname }: AppProps) {
         searchPlaceholder="Search agents"
       >
         <AgentsPage searchValue={searchValue} />
+      </StaticRouteShell>
+    );
+  }
+  if (route.path === "/publishing") {
+    return (
+      <StaticRouteShell
+        activePath={route.path}
+        searchValue={searchValue}
+        onSearchChange={setSearchValue}
+        onNavigate={navigate}
+        searchLabel="Search publishing"
+        searchPlaceholder="Search publishing"
+      >
+        <PublishingPage />
       </StaticRouteShell>
     );
   }

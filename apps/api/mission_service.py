@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from apps.api.mission_models import (
     Mission,
+    MissionMediaAsset,
     MissionPipelineState,
     MissionPlatform,
     MissionStage,
@@ -122,6 +123,11 @@ class MissionService:
                 replace(
                     mission,
                     status=MissionStatus.FAILED,
+                    render_status=(
+                        "FAILED"
+                        if mission.render_job_id is not None
+                        else mission.render_status
+                    ),
                     error_message="Mission execution failed.",
                     updated_at=self._clock(),
                 ),
@@ -163,6 +169,7 @@ class MissionService:
                 current,
                 updated_at=self._clock(),
                 render_job_id=result.render_job.job_id,
+                render_status=result.render_job.status.value,
                 pipeline_state=MissionPipelineState(
                     current_stage=MissionStage.RENDERING,
                     completed_stages=_completed_before(MissionStage.RENDERING),
@@ -176,10 +183,21 @@ class MissionService:
             provider_id="mock-video",
         )
         current = self.repository.get(mission_id)
+        asset_snapshot = MissionMediaAsset(
+            asset_id=asset.asset_id,
+            asset_type=asset.asset_type.value,
+            name=asset.name,
+            description=asset.description,
+            provider=asset.provider,
+            format=asset.format,
+            metadata=asset.metadata,
+        )
         self.repository.save(
             replace(
                 current,
                 updated_at=self._clock(),
+                render_status=result.render_job.status.value,
+                media_asset=asset_snapshot,
                 pipeline_state=MissionPipelineState(
                     current_stage=MissionStage.DOWNLOAD,
                     completed_stages=_completed_before(MissionStage.DOWNLOAD),

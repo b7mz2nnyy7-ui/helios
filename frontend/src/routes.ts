@@ -3,6 +3,7 @@ export const appRoutes = [
   { label: "System", path: "/system" },
   { label: "Missions", path: "/missions" },
   { label: "Agents", path: "/agents" },
+  { label: "Publishing", path: "/publishing" },
   { label: "Settings", path: "/settings" },
 ] as const;
 

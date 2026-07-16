@@ -79,6 +79,18 @@ class MissionPipelineStateResponse(BaseModel):
     completed_task_ids: list[str]
 
 
+class MissionMediaAssetResponse(BaseModel):
+    """Persisted provider-neutral asset associated with a mission."""
+
+    asset_id: str
+    asset_type: str
+    name: str
+    description: str
+    provider: str
+    format: str
+    metadata: dict[str, Any]
+
+
 class MissionResponse(BaseModel):
     """Public representation of one local Helios mission."""
 
@@ -93,6 +105,8 @@ class MissionResponse(BaseModel):
     updated_at: datetime
     video_id: str | None
     render_job_id: str | None
+    render_status: str | None
+    media_asset: MissionMediaAssetResponse | None
     pipeline_state: MissionPipelineStateResponse
     error_message: str | None
 

@@ -19,6 +19,8 @@ function mission(status: Mission["status"]): Mission {
     updated_at: "2026-07-16T10:00:01Z",
     video_id: status === "COMPLETED" ? "video-1" : null,
     render_job_id: "render-1",
+    render_status: status === "COMPLETED" ? "COMPLETED" : "PENDING",
+    media_asset: null,
     pipeline_state: {
       current_stage: status === "COMPLETED" ? "Completed" : "Research",
       completed_stages: status === "COMPLETED" ? ["Research", "Script", "Storyboard", "Rendering", "Download"] : [],

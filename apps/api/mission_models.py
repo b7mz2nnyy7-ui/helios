@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 import math
+from types import MappingProxyType
+from collections.abc import Mapping
+from typing import Any
 
 
 class MissionStatus(StrEnum):
@@ -45,6 +48,33 @@ class MissionPipelineState:
 
 
 @dataclass(frozen=True)
+class MissionMediaAsset:
+    """Immutable provider-neutral asset reference retained by a mission."""
+
+    asset_id: str
+    asset_type: str
+    name: str
+    description: str
+    provider: str
+    format: str
+    metadata: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        """Validate and protect asset metadata from external mutation."""
+        for field_name, value in (
+            ("asset_id", self.asset_id),
+            ("asset_type", self.asset_type),
+            ("name", self.name),
+            ("provider", self.provider),
+            ("format", self.format),
+        ):
+            if not value.strip():
+                msg = f"{field_name} must not be empty."
+                raise ValueError(msg)
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
+
+
+@dataclass(frozen=True)
 class Mission:
     """Immutable local representation of one Helios production mission."""
 
@@ -60,6 +90,8 @@ class Mission:
     pipeline_state: MissionPipelineState
     video_id: str | None = None
     render_job_id: str | None = None
+    render_status: str | None = None
+    media_asset: MissionMediaAsset | None = None
     error_message: str | None = None
 
     def __post_init__(self) -> None:
@@ -83,3 +115,22 @@ class Mission:
             if timestamp.tzinfo is not UTC or not math.isfinite(timestamp.timestamp()):
                 msg = f"{field_name} must use a finite UTC timestamp."
                 raise ValueError(msg)
+
+
+def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        msg = "metadata must be a mapping."
+        raise ValueError(msg)
+    return MappingProxyType(
+        {str(key): _freeze_value(item) for key, item in value.items()},
+    )
+
+
+def _freeze_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _freeze_mapping(value)
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_value(item) for item in value)
+    if isinstance(value, set | frozenset):
+        return frozenset(_freeze_value(item) for item in value)
+    return value

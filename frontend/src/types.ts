@@ -66,8 +66,20 @@ export interface Mission {
   updated_at: string;
   video_id: string | null;
   render_job_id: string | null;
+  render_status: string | null;
+  media_asset: MissionMediaAsset | null;
   pipeline_state: MissionPipelineState;
   error_message: string | null;
+}
+
+export interface MissionMediaAsset {
+  asset_id: string;
+  asset_type: string;
+  name: string;
+  description: string;
+  provider: string;
+  format: string;
+  metadata: Record<string, unknown>;
 }
 
 export interface MissionCreateInput {
