@@ -1,9 +1,11 @@
 """Pydantic contracts for the local Helios API."""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from apps.api.mission_models import MissionPlatform
 
 
 class ContentPipelineRequest(BaseModel):
@@ -47,6 +49,52 @@ class HealthResponse(BaseModel):
     """Health response for the local API process."""
 
     status: str
+
+
+class MissionCreateRequest(BaseModel):
+    """Validated input for creating one local production mission."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    prompt: str = Field(min_length=1)
+    platform: MissionPlatform
+    duration: Literal[15, 30, 60] = 30
+    render_model: str = Field(default="gen4.5", min_length=1)
+
+    @field_validator("prompt", "render_model")
+    @classmethod
+    def validate_mission_text(cls, value: str) -> str:
+        """Reject mission values containing only whitespace."""
+        if not value:
+            msg = "value must be a non-empty string."
+            raise ValueError(msg)
+        return value
+
+
+class MissionPipelineStateResponse(BaseModel):
+    """Observable progress derived from real pipeline steps."""
+
+    current_stage: str
+    completed_stages: list[str]
+    completed_task_ids: list[str]
+
+
+class MissionResponse(BaseModel):
+    """Public representation of one local Helios mission."""
+
+    id: str
+    title: str
+    prompt: str
+    platform: str
+    duration: int
+    render_model: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    video_id: str | None
+    render_job_id: str | None
+    pipeline_state: MissionPipelineStateResponse
+    error_message: str | None
 
 
 class VideoSummaryResponse(BaseModel):

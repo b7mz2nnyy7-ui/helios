@@ -1,11 +1,35 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  createMission,
+  fetchMission,
+  fetchMissions,
   fetchSystemHealth,
   fetchSystemReport,
   fetchVideos,
   videoStreamUrl,
 } from "./api";
+import type { Mission } from "./types";
+
+const mission: Mission = {
+  id: "mission-1",
+  title: "AI Agents",
+  prompt: "AI Agents",
+  platform: "YouTube",
+  duration: 30,
+  render_model: "gen4.5",
+  status: "RUNNING",
+  created_at: "2026-07-16T10:00:00Z",
+  updated_at: "2026-07-16T10:00:01Z",
+  video_id: null,
+  render_job_id: null,
+  pipeline_state: {
+    current_stage: "Research",
+    completed_stages: [],
+    completed_task_ids: [],
+  },
+  error_message: null,
+};
 
 describe("video API client", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -55,6 +79,54 @@ describe("video API client", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/system/report",
       expect.objectContaining({ headers: { Accept: "text/markdown" } }),
+    );
+  });
+});
+
+describe("mission API client", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("creates a mission through the public API contract", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => mission,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      createMission({
+        prompt: "AI Agents",
+        platform: "YouTube",
+        duration: 30,
+        render_model: "gen4.5",
+      }),
+    ).resolves.toEqual(mission);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/missions",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          prompt: "AI Agents",
+          platform: "YouTube",
+          duration: 30,
+          render_model: "gen4.5",
+        }),
+      }),
+    );
+  });
+
+  it("loads mission lists and individual progress", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => [mission] })
+      .mockResolvedValueOnce({ ok: true, json: async () => mission });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchMissions()).resolves.toEqual([mission]);
+    await expect(fetchMission("mission one")).resolves.toEqual(mission);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/missions/mission%20one",
+      expect.objectContaining({ headers: { Accept: "application/json" } }),
     );
   });
 });

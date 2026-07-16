@@ -36,3 +36,43 @@ export interface VideoDetail extends VideoSummary {
   mime_type: string;
   metadata: Record<string, unknown>;
 }
+
+export type MissionStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
+export type MissionPlatform = "YouTube" | "TikTok" | "Instagram" | "X";
+export type MissionDuration = 15 | 30 | 60;
+export type MissionStage =
+  | "Research"
+  | "Script"
+  | "Storyboard"
+  | "Rendering"
+  | "Download"
+  | "Completed";
+
+export interface MissionPipelineState {
+  current_stage: MissionStage;
+  completed_stages: MissionStage[];
+  completed_task_ids: string[];
+}
+
+export interface Mission {
+  id: string;
+  title: string;
+  prompt: string;
+  platform: MissionPlatform;
+  duration: MissionDuration;
+  render_model: string;
+  status: MissionStatus;
+  created_at: string;
+  updated_at: string;
+  video_id: string | null;
+  render_job_id: string | null;
+  pipeline_state: MissionPipelineState;
+  error_message: string | null;
+}
+
+export interface MissionCreateInput {
+  prompt: string;
+  platform: MissionPlatform;
+  duration: MissionDuration;
+  render_model: string;
+}

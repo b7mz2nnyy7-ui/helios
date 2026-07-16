@@ -1,20 +1,26 @@
 import type { ReactNode } from "react";
+import type { MouseEvent } from "react";
+
+import { appRoutes } from "../routes";
+import type { AppRoutePath } from "../routes";
 
 interface AppShellProps {
   children: ReactNode;
   searchValue: string;
   onSearchChange: (value: string) => void;
-  activeSection?: string;
+  activePath?: AppRoutePath;
+  onNavigate?: (path: AppRoutePath) => void;
+  searchLabel?: string;
   searchPlaceholder?: string;
 }
-
-const navigation = ["Videos", "System", "Missions", "Agents", "Settings"];
 
 export function AppShell({
   children,
   searchValue,
   onSearchChange,
-  activeSection = "Videos",
+  activePath = "/videos",
+  onNavigate,
+  searchLabel = "Search videos",
   searchPlaceholder = "Search productions",
 }: AppShellProps) {
   return (
@@ -33,7 +39,7 @@ export function AppShell({
         </a>
         <div className="mx-3 w-full max-w-[540px] sm:mx-5 md:mx-auto">
           <label className="sr-only" htmlFor="video-search">
-            Search videos
+            {searchLabel}
           </label>
           <input
             id="video-search"
@@ -57,20 +63,21 @@ export function AppShell({
       <aside className="fixed bottom-0 left-0 top-[72px] hidden w-[240px] border-r border-[#dedfd9] bg-white px-4 py-7 md:block">
         <nav aria-label="Primary navigation">
           <ul className="space-y-1">
-            {navigation.map((item) => {
-              const active = item === activeSection;
+            {appRoutes.map((route) => {
+              const active = route.path === activePath;
               return (
-                <li key={item}>
+                <li key={route.path}>
                   <a
                     className={`flex h-10 items-center rounded-md px-3 text-sm font-medium transition ${
                       active
                         ? "bg-[#edf2ed] text-[#1d5138]"
                         : "text-[#666b64] hover:bg-[#f5f6f3] hover:text-[#20231f]"
                     }`}
-                    href={`/${item.toLowerCase()}`}
+                    href={route.path}
                     aria-current={active ? "page" : undefined}
+                    onClick={(event) => handleNavigation(event, route.path, onNavigate)}
                   >
-                    {item}
+                    {route.label}
                   </a>
                 </li>
               );
@@ -86,4 +93,23 @@ export function AppShell({
       </main>
     </div>
   );
+}
+
+function handleNavigation(
+  event: MouseEvent<HTMLAnchorElement>,
+  path: AppRoutePath,
+  onNavigate: ((path: AppRoutePath) => void) | undefined,
+) {
+  if (
+    !onNavigate ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey
+  ) {
+    return;
+  }
+  event.preventDefault();
+  onNavigate(path);
 }

@@ -2,17 +2,23 @@
 
 from collections.abc import Callable
 
-from fastapi import FastAPI, Header, HTTPException, Response, status
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Response, status
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from apps.api.models import (
     ContentPipelineRequest,
     ContentPipelineResponse,
     HealthResponse,
+    MissionCreateRequest,
+    MissionPipelineStateResponse,
+    MissionResponse,
     SystemHealthResponse,
     VideoDetailResponse,
     VideoSummaryResponse,
 )
+from apps.api.mission_models import Mission
+from apps.api.mission_repository import MissionRepository
+from apps.api.mission_service import MissionService
 from apps.api.service import ContentPipelineService
 from apps.api.video_streaming import ByteRange, iter_file_range, parse_range_header
 from engine.guardian.guardian import ArgusGuardian, create_guardian
@@ -21,17 +27,23 @@ from engine.media.scanner import MediaStorageScanner, ScannedVideo
 ServiceFactory = Callable[[], ContentPipelineService]
 ScannerFactory = Callable[[], MediaStorageScanner]
 GuardianFactory = Callable[[], ArgusGuardian]
+MissionServiceFactory = Callable[[MissionRepository], MissionService]
 
 
 def create_app(
     service_factory: ServiceFactory | None = None,
     scanner_factory: ScannerFactory | None = None,
     guardian_factory: GuardianFactory | None = None,
+    mission_repository: MissionRepository | None = None,
+    mission_service_factory: MissionServiceFactory | None = None,
 ) -> FastAPI:
     """Create the local Helios API with isolated per-request services."""
     selected_service_factory = service_factory or ContentPipelineService
     selected_scanner_factory = scanner_factory or MediaStorageScanner
     selected_guardian_factory = guardian_factory or create_guardian
+    selected_mission_repository = mission_repository or MissionRepository()
+    selected_mission_service_factory = mission_service_factory or MissionService
+    mission_service = selected_mission_service_factory(selected_mission_repository)
     api = FastAPI(title="Helios Local API", version="1.0.0")
 
     @api.get("/health", response_model=HealthResponse)
@@ -62,6 +74,42 @@ def create_app(
             _video_summary(video)
             for video in selected_scanner_factory().scan()
         ]
+
+    @api.post(
+        "/api/missions",
+        response_model=MissionResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def create_mission(
+        request: MissionCreateRequest,
+        background_tasks: BackgroundTasks,
+    ) -> MissionResponse:
+        """Queue one mission and execute it after returning the response."""
+        mission = mission_service.create(
+            prompt=request.prompt,
+            platform=request.platform,
+            duration=request.duration,
+            render_model=request.render_model,
+        )
+        background_tasks.add_task(mission_service.execute, mission.mission_id)
+        return _mission_response(mission)
+
+    @api.get("/api/missions", response_model=list[MissionResponse])
+    def list_missions() -> list[MissionResponse]:
+        """Return all locally known missions newest first."""
+        return [_mission_response(mission) for mission in mission_service.all()]
+
+    @api.get("/api/missions/{mission_id}", response_model=MissionResponse)
+    def get_mission(mission_id: str) -> MissionResponse:
+        """Return one mission or a controlled 404 response."""
+        try:
+            mission = mission_service.get(mission_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Mission not found.",
+            ) from error
+        return _mission_response(mission)
 
     @api.get("/api/videos/{video_id}", response_model=VideoDetailResponse)
     def get_video(video_id: str) -> VideoDetailResponse:
@@ -151,6 +199,29 @@ def _video_detail(video: ScannedVideo) -> VideoDetailResponse:
         **_video_summary(video).model_dump(),
         mime_type=video.mime_type,
         metadata=dict(video.metadata),
+    )
+
+
+def _mission_response(mission: Mission) -> MissionResponse:
+    state = mission.pipeline_state
+    return MissionResponse(
+        id=mission.mission_id,
+        title=mission.title,
+        prompt=mission.prompt,
+        platform=mission.platform.value,
+        duration=mission.duration,
+        render_model=mission.render_model,
+        status=mission.status.value,
+        created_at=mission.created_at,
+        updated_at=mission.updated_at,
+        video_id=mission.video_id,
+        render_job_id=mission.render_job_id,
+        pipeline_state=MissionPipelineStateResponse(
+            current_stage=state.current_stage.value,
+            completed_stages=[stage.value for stage in state.completed_stages],
+            completed_task_ids=list(state.completed_task_ids),
+        ),
+        error_message=mission.error_message,
     )
 
 

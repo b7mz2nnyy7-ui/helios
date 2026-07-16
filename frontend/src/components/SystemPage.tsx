@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { fetchSystemHealth, fetchSystemReport } from "../api";
+import { ErrorState } from "./ErrorState";
+import { LoadingScreen } from "./LoadingScreen";
 import type {
   CheckStatus,
   GuardianStatus,
@@ -32,36 +34,58 @@ export function SystemPage({ searchValue }: SystemPageProps) {
   const [report, setReport] = useState<SystemHealthReport | null>(null);
   const [markdown, setMarkdown] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [requestVersion, setRequestVersion] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
+    let active = true;
     Promise.all([
       fetchSystemHealth(controller.signal),
       fetchSystemReport(controller.signal),
     ])
       .then(([health, reportMarkdown]) => {
-        setReport(health);
-        setMarkdown(reportMarkdown);
+        if (active) {
+          setReport(health);
+          setMarkdown(reportMarkdown);
+          setError(null);
+        }
       })
       .catch((requestError: unknown) => {
-        if (requestError instanceof DOMException && requestError.name === "AbortError") {
+        if (
+          !active ||
+          (requestError instanceof DOMException && requestError.name === "AbortError")
+        ) {
           return;
         }
-        setError("System health could not be loaded.");
+        setError("System health could not be loaded. Please try again.");
+      })
+      .finally(() => {
+        if (active) {
+          setLoading(false);
+        }
       });
-    return () => controller.abort();
-  }, []);
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [requestVersion]);
 
-  if (error) {
-    return (
-      <div className="border-l-2 border-[#9e3f35] py-2 pl-4 text-sm text-[#7d3028]">
-        {error}
-      </div>
-    );
+  const retry = () => {
+    setError(null);
+    setLoading(true);
+    setRequestVersion((version) => version + 1);
+  };
+
+  if (loading) {
+    return <LoadingScreen />;
   }
-  if (!report) {
+  if (error || !report) {
     return (
-      <div className="h-48 animate-pulse rounded-lg border border-[#e0e1dc] bg-white" />
+      <ErrorState
+        message={error ?? "System health is unavailable."}
+        onRetry={retry}
+      />
     );
   }
   return (
