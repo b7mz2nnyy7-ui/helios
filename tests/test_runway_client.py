@@ -12,7 +12,13 @@ from engine.media.providers.config import (
     ProviderConfigurationError,
 )
 from integrations.runway.client import RUNWAY_DEFAULT_BASE_URL, RunwayClient
-from integrations.runway.models import RunwayGenerationRequest, RunwayTask
+from integrations.runway.models import (
+    RUNWAY_OFFICIAL_TEXT_TO_VIDEO_MODELS,
+    RunwayGenerationMode,
+    RunwayGenerationRequest,
+    RunwayTask,
+    normalize_runway_duration,
+)
 
 
 class RecordingRunwayTransport:
@@ -57,8 +63,8 @@ def create_request() -> RunwayGenerationRequest:
     return RunwayGenerationRequest(
         model="gen4.5",
         prompt_text="A deterministic product workflow.",
-        ratio="768:1280",
-        duration_seconds=10.0,
+        ratio="720:1280",
+        duration_seconds=10,
         seed=None,
     )
 
@@ -96,6 +102,9 @@ class RunwayClientTestCase(unittest.TestCase):
         request = create_request()
 
         self.assertEqual(request.model, "gen4.5")
+        self.assertIs(type(request.duration_seconds), int)
+        self.assertIs(request.mode, RunwayGenerationMode.TEXT_TO_VIDEO)
+        self.assertIsNone(request.prompt_image)
         for field_name in ("model", "prompt_text", "ratio"):
             values = {
                 "model": request.model,
@@ -109,18 +118,99 @@ class RunwayClientTestCase(unittest.TestCase):
                         model=values["model"],
                         prompt_text=values["prompt_text"],
                         ratio=values["ratio"],
-                        duration_seconds=10.0,
+                        duration_seconds=10,
                         seed=None,
                     )
+
+    def test_official_text_models_are_documented_separately(self) -> None:
+        """The official endpoint model set is distinct from implemented support."""
+        self.assertIn("gen4.5", RUNWAY_OFFICIAL_TEXT_TO_VIDEO_MODELS)
+        self.assertIn("veo3.1", RUNWAY_OFFICIAL_TEXT_TO_VIDEO_MODELS)
 
         with self.assertRaises(ValueError):
             RunwayGenerationRequest(
                 model="gen4.5",
                 prompt_text="Prompt",
-                ratio="768:1280",
+                ratio="720:1280",
                 duration_seconds=0,
                 seed=None,
             )
+
+    def test_generation_mode_validates_image_requirements(self) -> None:
+        """Only image mode accepts and requires an input image."""
+        with self.assertRaises(ValueError):
+            RunwayGenerationRequest(
+                model="gen4.5",
+                prompt_text="Prompt",
+                ratio="720:1280",
+                duration_seconds=5,
+                mode=RunwayGenerationMode.IMAGE_TO_VIDEO,
+            )
+        with self.assertRaises(ValueError):
+            RunwayGenerationRequest(
+                model="gen4.5",
+                prompt_text="Prompt",
+                ratio="720:1280",
+                duration_seconds=5,
+                mode=RunwayGenerationMode.TEXT_TO_VIDEO,
+                prompt_image="https://example.invalid/source.png",
+            )
+
+    def test_text_to_video_contract_rejects_unsupported_values(self) -> None:
+        """Gen-4.5 text requests enforce model, prompt, ratio and seed."""
+        invalid_requests = (
+            {
+                "model": "unsupported",
+                "prompt_text": "Prompt",
+                "ratio": "1280:720",
+                "duration_seconds": 5,
+            },
+            {
+                "model": "gen4.5",
+                "prompt_text": "Prompt",
+                "ratio": "768:1280",
+                "duration_seconds": 5,
+            },
+            {
+                "model": "gen4.5",
+                "prompt_text": "x" * 1001,
+                "ratio": "1280:720",
+                "duration_seconds": 5,
+            },
+            {
+                "model": "gen4.5",
+                "prompt_text": "Prompt",
+                "ratio": "1280:720",
+                "duration_seconds": 5,
+                "seed": 4_294_967_296,
+            },
+        )
+        for values in invalid_requests:
+            with self.subTest(values=values):
+                with self.assertRaises(ValueError):
+                    RunwayGenerationRequest(**values)  # type: ignore[arg-type]
+
+    def test_duration_normalization_is_exact_and_model_aware(self) -> None:
+        """Whole CLI floats normalize to int without silent rounding."""
+        for duration in (5, 5.0):
+            with self.subTest(duration=duration):
+                normalized = normalize_runway_duration("gen4.5", duration)
+                self.assertEqual(normalized, 5)
+                self.assertIs(type(normalized), int)
+
+        invalid_durations: tuple[int | float, ...] = (
+            0,
+            1,
+            11,
+            5.5,
+            float("nan"),
+            float("inf"),
+            True,
+        )
+        for duration in invalid_durations:
+            with self.subTest(duration=duration):
+                with self.assertRaises(ValueError):
+                    normalize_runway_duration("gen4.5", duration)
 
     def test_runway_task_validation(self) -> None:
         """Runway tasks validate IDs, status and output values."""

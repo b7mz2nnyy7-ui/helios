@@ -11,7 +11,11 @@ from engine.media.asset import MediaAssetType
 from engine.media.providers.base import MediaProviderError
 from engine.media.providers.config import ProviderConfig
 from integrations.runway.client import RunwayClient
-from integrations.runway.models import RunwayGenerationRequest, RunwayTask
+from integrations.runway.models import (
+    RunwayGenerationRequest,
+    RunwayTask,
+    normalize_runway_duration,
+)
 from integrations.runway.polling import RunwayPollingResult, RunwayTaskPoller
 from integrations.runway.provider import RunwayVideoProvider, build_runway_prompt
 from tests.test_runway_client import RecordingRunwayTransport
@@ -252,8 +256,11 @@ class RunwayProviderPollingIntegrationTestCase(unittest.TestCase):
         expected_request = RunwayGenerationRequest(
             model="gen4.5",
             prompt_text=build_runway_prompt(original_job.plan),
-            ratio="768:1280",
-            duration_seconds=original_job.plan.total_duration_seconds,
+            ratio="720:1280",
+            duration_seconds=normalize_runway_duration(
+                "gen4.5",
+                original_job.plan.total_duration_seconds,
+            ),
             seed=None,
         )
 

@@ -1,6 +1,7 @@
 """Tests for the local Helios HTTP API."""
 
 import json
+import os
 import socket
 import struct
 import unittest
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 from apps.api.app import create_app
 from apps.api.models import ContentPipelineRequest, ContentPipelineResponse
 from apps.api.service import ContentPipelineService
+from engine.guardian.guardian import ArgusGuardian, GuardianContext, create_guardian
 from engine.media.scanner import MediaStorageScanner
 
 
@@ -320,6 +322,68 @@ class VideoAPITestCase(unittest.TestCase):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 404)
                 self.assertEqual(response.json(), {"detail": "Video not found."})
+
+
+class SystemGuardianAPITestCase(unittest.TestCase):
+    """Tests for ARGUS JSON and Markdown API endpoints."""
+
+    def setUp(self) -> None:
+        """Create an isolated output directory and guardian API client."""
+        self.temporary_directory = TemporaryDirectory()
+        output_directory = Path(self.temporary_directory.name)
+
+        def guardian_factory() -> ArgusGuardian:
+            return create_guardian(
+                GuardianContext(
+                    runtime_probe=lambda: True,
+                    output_directory=output_directory,
+                ),
+            )
+
+        self.client = TestClient(create_app(guardian_factory=guardian_factory))
+
+    def tearDown(self) -> None:
+        """Remove temporary guardian API state."""
+        self.temporary_directory.cleanup()
+
+    def test_system_health_returns_complete_json_report(self) -> None:
+        """GET /api/system/health exposes all ARGUS report fields."""
+        response = self.client.get("/api/system/health")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["generated_by"], "Argus")
+        self.assertEqual(payload["overall_status"], "HEALTHY")
+        self.assertEqual(len(payload["checks"]), 15)
+        self.assertIn("counters", payload)
+        self.assertIn("created_at", payload)
+
+    def test_system_report_returns_markdown(self) -> None:
+        """GET /api/system/report returns the readable ARGUS report."""
+        response = self.client.get("/api/system/report")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["content-type"].startswith("text/markdown"))
+        self.assertIn("# ARGUS REPORT", response.text)
+        self.assertIn("Overall: **HEALTHY**", response.text)
+
+    def test_system_health_runs_fresh_inspections(self) -> None:
+        """Repeated requests return independent current UTC reports."""
+        first = self.client.get("/api/system/health").json()
+        second = self.client.get("/api/system/health").json()
+
+        self.assertIsNot(first, second)
+        self.assertEqual(first["guardian_version"], second["guardian_version"])
+
+    def test_system_endpoints_expose_no_secret_values(self) -> None:
+        """Guardian API output contains no environment or API key values."""
+        secret = "must-not-appear"
+        with patch.dict(os.environ, {"HELIOS_MEDIA_RUNWAY_API_KEY": secret}):
+            health = self.client.get("/api/system/health")
+            report = self.client.get("/api/system/report")
+
+        self.assertNotIn(secret, health.text)
+        self.assertNotIn(secret, report.text)
 
 
 if __name__ == "__main__":

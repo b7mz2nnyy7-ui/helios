@@ -14,7 +14,11 @@ from engine.media.render_job import RenderJob, RenderJobStatus
 from engine.media.render_plan import RenderScene, VideoProductionPlan
 from engine.media.render_service import RenderService
 from integrations.runway.client import RunwayClient
-from integrations.runway.models import RunwayGenerationRequest, RunwayTask
+from integrations.runway.models import (
+    RunwayGenerationMode,
+    RunwayGenerationRequest,
+    RunwayTask,
+)
 from integrations.runway.provider import RunwayVideoProvider, build_runway_prompt
 from tests.test_runway_client import RecordingRunwayTransport
 
@@ -166,6 +170,7 @@ class RunwayVideoProviderTestCase(unittest.TestCase):
             {
                 "runway_task_id": "runway-task-42",
                 "output_url": "https://example.invalid/runway.mp4",
+                "output_url_is_temporary": True,
                 "plan_id": "plan-runway",
                 "render_job_id": "render-runway",
                 "target_platform": "TikTok",
@@ -186,9 +191,12 @@ class RunwayVideoProviderTestCase(unittest.TestCase):
         request = transport.create_calls[0][0]
         self.assertIsInstance(request, RunwayGenerationRequest)
         self.assertEqual(request.model, "gen4.5")
-        self.assertEqual(request.duration_seconds, 10.0)
-        self.assertEqual(request.ratio, "768:1280")
+        self.assertEqual(request.duration_seconds, 10)
+        self.assertIs(type(request.duration_seconds), int)
+        self.assertEqual(request.ratio, "720:1280")
         self.assertIsNone(request.seed)
+        self.assertIs(request.mode, RunwayGenerationMode.TEXT_TO_VIDEO)
+        self.assertIsNone(request.prompt_image)
 
     def test_unfinished_task_is_rejected(self) -> None:
         """Providers do not poll unfinished tasks."""

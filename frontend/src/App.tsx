@@ -5,6 +5,7 @@ import { AppShell } from "./components/AppShell";
 import { EmptyState } from "./components/EmptyState";
 import { VideoCard } from "./components/VideoCard";
 import { VideoPlayerModal } from "./components/VideoPlayerModal";
+import { SystemPage } from "./components/SystemPage";
 import { matchesVideoSearch } from "./format";
 import type { VideoSummary } from "./types";
 
@@ -12,10 +13,14 @@ export default function App() {
   const [videos, setVideos] = useState<VideoSummary[]>([]);
   const [selectedVideo, setSelectedVideo] = useState<VideoSummary | null>(null);
   const [searchValue, setSearchValue] = useState("");
-  const [loading, setLoading] = useState(true);
+  const systemRoute = window.location.pathname === "/system";
+  const [loading, setLoading] = useState(!systemRoute);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (systemRoute) {
+      return undefined;
+    }
     const controller = new AbortController();
     fetchVideos(controller.signal)
       .then(setVideos)
@@ -27,14 +32,31 @@ export default function App() {
       })
       .finally(() => setLoading(false));
     return () => controller.abort();
-  }, []);
+  }, [systemRoute]);
 
   const filteredVideos = useMemo(() => {
     return videos.filter((video) => matchesVideoSearch(video, searchValue));
   }, [searchValue, videos]);
 
+  if (systemRoute) {
+    return (
+      <AppShell
+        searchValue={searchValue}
+        onSearchChange={setSearchValue}
+        activeSection="System"
+        searchPlaceholder="Search system checks"
+      >
+        <SystemPage searchValue={searchValue} />
+      </AppShell>
+    );
+  }
+
   return (
-    <AppShell searchValue={searchValue} onSearchChange={setSearchValue}>
+    <AppShell
+      searchValue={searchValue}
+      onSearchChange={setSearchValue}
+      activeSection="Videos"
+    >
       <div className="flex items-end justify-between gap-5">
         <div>
           <p className="text-xs font-semibold uppercase text-[#617066]">Library</p>

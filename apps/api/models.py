@@ -66,3 +66,28 @@ class VideoDetailResponse(VideoSummaryResponse):
 
     mime_type: str
     metadata: dict[str, Any]
+
+
+class SystemCheckResponse(BaseModel):
+    """Public API representation of one ARGUS system check."""
+
+    id: str
+    name: str
+    severity: str
+    status: str
+    summary: str
+    details: dict[str, Any]
+    checked_at: datetime
+    duration_seconds: float
+
+
+class SystemHealthResponse(BaseModel):
+    """Public API representation of one complete ARGUS report."""
+
+    created_at: datetime
+    guardian_version: str
+    overall_status: str
+    checks: list[SystemCheckResponse]
+    counters: dict[str, int]
+    summary: str
+    generated_by: str

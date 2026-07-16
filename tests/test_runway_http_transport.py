@@ -9,14 +9,19 @@ from typing import cast
 from unittest.mock import patch
 
 from engine.media.providers.base import MediaProviderError
+from integrations.runway.client import RUNWAY_DEFAULT_BASE_URL
 from integrations.runway.http_transport import (
     HTTPExecutor,
     HTTPResponse,
     RUNWAY_API_VERSION,
     RunwayHTTPTransport,
     UrllibHTTPExecutor,
+    format_runway_request_diagnostics,
 )
-from integrations.runway.models import RunwayGenerationRequest
+from integrations.runway.models import (
+    RunwayGenerationMode,
+    RunwayGenerationRequest,
+)
 
 
 class RecordingHTTPExecutor:
@@ -62,8 +67,8 @@ def request(seed: int | None = None) -> RunwayGenerationRequest:
     return RunwayGenerationRequest(
         model="gen4.5",
         prompt_text="A precise product story.",
-        ratio="768:1280",
-        duration_seconds=5.0,
+        ratio="720:1280",
+        duration_seconds=5,
         seed=seed,
     )
 
@@ -145,7 +150,7 @@ class RunwayHTTPTransportTestCase(unittest.TestCase):
 
         method, url, headers, _, timeout = executor.calls[0]
         self.assertEqual(method, "POST")
-        self.assertEqual(url, "https://api.example/v1/image_to_video")
+        self.assertEqual(url, "https://api.example/v1/text_to_video")
         self.assertEqual(headers["Authorization"], "Bearer runway-secret")
         self.assertEqual(headers["X-Runway-Version"], RUNWAY_API_VERSION)
         self.assertEqual(headers["Content-Type"], "application/json")
@@ -163,13 +168,92 @@ class RunwayHTTPTransportTestCase(unittest.TestCase):
         self.assertEqual(
             body,
             (
-                b'{"duration":5.0,"model":"gen4.5",'
+                b'{"duration":5,"model":"gen4.5",'
                 b'"promptText":"A precise product story.",'
-                b'"ratio":"768:1280"}'
+                b'"ratio":"720:1280"}'
             ),
         )
         self.assertNotIn(b"seed", body or b"")
+        self.assertNotIn(b"promptImage", body or b"")
         self.assertNotIn(b"secret", body or b"")
+
+    def test_gen45_text_only_uses_exact_official_create_url(self) -> None:
+        """Gen-4.5 prompt-only requests use the dedicated text endpoint."""
+        transport, executor = create_transport()
+
+        transport.create_video(request(), "secret", RUNWAY_DEFAULT_BASE_URL, 10)
+
+        self.assertEqual(
+            executor.calls[0][1],
+            "https://api.dev.runwayml.com/v1/text_to_video",
+        )
+        self.assertNotIn("/image_to_video", executor.calls[0][1])
+
+    def test_base_url_trailing_slash_does_not_duplicate_version_path(self) -> None:
+        """Both supported base URL spellings produce one /v1 segment."""
+        for base_url in (
+            "https://api.dev.runwayml.com/v1",
+            "https://api.dev.runwayml.com/v1/",
+        ):
+            with self.subTest(base_url=base_url):
+                transport, executor = create_transport()
+
+                transport.create_video(request(), "secret", base_url, 10)
+
+                self.assertEqual(
+                    executor.calls[0][1],
+                    "https://api.dev.runwayml.com/v1/text_to_video",
+                )
+                self.assertEqual(executor.calls[0][1].count("/v1/"), 1)
+
+    def test_image_to_video_uses_image_endpoint_and_prompt_image(self) -> None:
+        """Image requests remain isolated on their dedicated endpoint."""
+        transport, executor = create_transport()
+        image_request = RunwayGenerationRequest(
+            model="gen4.5",
+            prompt_text="Animate the provided image.",
+            ratio="720:1280",
+            duration_seconds=5,
+            mode=RunwayGenerationMode.IMAGE_TO_VIDEO,
+            prompt_image="https://example.invalid/source.png",
+        )
+
+        transport.create_video(
+            image_request,
+            "secret",
+            RUNWAY_DEFAULT_BASE_URL,
+            10,
+        )
+
+        method, url, _, body, _ = executor.calls[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(
+            url,
+            "https://api.dev.runwayml.com/v1/image_to_video",
+        )
+        self.assertEqual(
+            json.loads(body or b"{}")["promptImage"],
+            "https://example.invalid/source.png",
+        )
+
+    def test_request_diagnostics_are_typed_and_secret_free(self) -> None:
+        """Offline diagnostics expose structure without prompt or secrets."""
+        generation_request = request()
+
+        diagnostics = format_runway_request_diagnostics(
+            generation_request,
+            "https://api.dev.runwayml.com/v1?api_key=hidden",
+        )
+
+        self.assertIn("Method: POST", diagnostics)
+        self.assertIn("Path: /v1/text_to_video", diagnostics)
+        self.assertIn("duration: 5 (int)", diagnostics)
+        self.assertIn("model: gen4.5 (str)", diagnostics)
+        self.assertIn("promptText: [24 characters] (str)", diagnostics)
+        self.assertIn("ratio: 720:1280 (str)", diagnostics)
+        self.assertNotIn(generation_request.prompt_text, diagnostics)
+        self.assertNotIn("hidden", diagnostics)
+        self.assertNotIn("Authorization", diagnostics)
 
     def test_create_includes_configured_seed(self) -> None:
         """Configured seed values are serialized."""
@@ -284,14 +368,15 @@ class RunwayHTTPTransportTestCase(unittest.TestCase):
                 self.assertEqual(task.status, status.upper())
 
     def test_http_failures_are_safely_wrapped(self) -> None:
-        """Relevant HTTP failures expose status but never credentials."""
+        """HTTP failures expose safe diagnostics but never credentials."""
         secret = "highly-sensitive-key"
         for status_code in (400, 401, 429, 500):
             with self.subTest(status_code=status_code):
                 transport, _ = create_transport(
                     {
                         "message": (
-                            f"Authorization: Bearer {secret} request rejected"
+                            f"Authorization: Bearer {secret} rejected "
+                            "https://signed.example/video.mp4?token=sensitive"
                         ),
                         "private": "full-sensitive-response",
                     },
@@ -306,9 +391,34 @@ class RunwayHTTPTransportTestCase(unittest.TestCase):
                     )
 
                 message = str(context.exception)
-                self.assertIn(str(status_code), message)
+                self.assertIn(
+                    f"POST /v1/text_to_video returned HTTP {status_code}",
+                    message,
+                )
                 self.assertNotIn(secret, message)
+                self.assertNotIn("Authorization:", message)
+                self.assertNotIn("signed.example", message)
+                self.assertNotIn("token=sensitive", message)
                 self.assertNotIn("full-sensitive-response", message)
+
+    def test_get_failure_reports_method_and_safe_path(self) -> None:
+        """Task errors identify the GET path without host or credentials."""
+        transport, _ = create_transport(
+            {"message": "Task lookup failed"},
+            500,
+        )
+
+        with self.assertRaises(MediaProviderError) as context:
+            transport.get_task(
+                "task-1",
+                "secret",
+                "https://api.dev.runwayml.com/v1/",
+                10,
+            )
+
+        message = str(context.exception)
+        self.assertIn("GET /v1/tasks/task-1 returned HTTP 500", message)
+        self.assertNotIn("api.dev.runwayml.com", message)
 
     def test_invalid_json_is_wrapped_with_cause(self) -> None:
         """Invalid JSON becomes a MediaProviderError with decoder cause."""

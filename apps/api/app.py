@@ -3,30 +3,35 @@
 from collections.abc import Callable
 
 from fastapi import FastAPI, Header, HTTPException, Response, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from apps.api.models import (
     ContentPipelineRequest,
     ContentPipelineResponse,
     HealthResponse,
+    SystemHealthResponse,
     VideoDetailResponse,
     VideoSummaryResponse,
 )
 from apps.api.service import ContentPipelineService
 from apps.api.video_streaming import ByteRange, iter_file_range, parse_range_header
+from engine.guardian.guardian import ArgusGuardian, create_guardian
 from engine.media.scanner import MediaStorageScanner, ScannedVideo
 
 ServiceFactory = Callable[[], ContentPipelineService]
 ScannerFactory = Callable[[], MediaStorageScanner]
+GuardianFactory = Callable[[], ArgusGuardian]
 
 
 def create_app(
     service_factory: ServiceFactory | None = None,
     scanner_factory: ScannerFactory | None = None,
+    guardian_factory: GuardianFactory | None = None,
 ) -> FastAPI:
     """Create the local Helios API with isolated per-request services."""
     selected_service_factory = service_factory or ContentPipelineService
     selected_scanner_factory = scanner_factory or MediaStorageScanner
+    selected_guardian_factory = guardian_factory or create_guardian
     api = FastAPI(title="Helios Local API", version="1.0.0")
 
     @api.get("/health", response_model=HealthResponse)
@@ -103,6 +108,18 @@ def create_app(
             media_type="video/mp4",
             headers=headers,
         )
+
+    @api.get("/api/system/health", response_model=SystemHealthResponse)
+    def system_health() -> SystemHealthResponse:
+        """Return a fresh structured ARGUS health report."""
+        report = selected_guardian_factory().inspect()
+        return SystemHealthResponse.model_validate_json(report.to_json())
+
+    @api.get("/api/system/report", response_class=PlainTextResponse)
+    def system_report() -> PlainTextResponse:
+        """Return a fresh ARGUS report as Markdown."""
+        report = selected_guardian_factory().inspect()
+        return PlainTextResponse(report.to_markdown(), media_type="text/markdown")
 
     return api
 

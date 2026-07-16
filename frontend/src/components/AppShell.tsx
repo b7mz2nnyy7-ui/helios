@@ -4,14 +4,18 @@ interface AppShellProps {
   children: ReactNode;
   searchValue: string;
   onSearchChange: (value: string) => void;
+  activeSection?: string;
+  searchPlaceholder?: string;
 }
 
-const navigation = ["Videos", "Missions", "Agents", "Settings"];
+const navigation = ["Videos", "System", "Missions", "Agents", "Settings"];
 
 export function AppShell({
   children,
   searchValue,
   onSearchChange,
+  activeSection = "Videos",
+  searchPlaceholder = "Search productions",
 }: AppShellProps) {
   return (
     <div className="min-h-screen bg-[#f7f8f6] text-[#171916]">
@@ -35,7 +39,7 @@ export function AppShell({
             id="video-search"
             className="h-10 w-full rounded-md border border-[#d9dbd5] bg-[#f7f8f6] px-4 text-sm outline-none transition focus:border-[#216e4e] focus:bg-white focus:ring-2 focus:ring-[#216e4e]/10"
             type="search"
-            placeholder="Search productions"
+            placeholder={searchPlaceholder}
             value={searchValue}
             onChange={(event) => onSearchChange(event.target.value)}
           />
@@ -54,7 +58,7 @@ export function AppShell({
         <nav aria-label="Primary navigation">
           <ul className="space-y-1">
             {navigation.map((item) => {
-              const active = item === "Videos";
+              const active = item === activeSection;
               return (
                 <li key={item}>
                   <a
