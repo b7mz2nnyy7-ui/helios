@@ -8,3 +8,6 @@ __pycache__/
 .env.*
 !.env.example
 output/
+node_modules/
+frontend/dist/
+frontend/coverage/

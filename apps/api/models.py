@@ -1,5 +1,8 @@
 """Pydantic contracts for the local Helios API."""
 
+from datetime import datetime
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -44,3 +47,22 @@ class HealthResponse(BaseModel):
     """Health response for the local API process."""
 
     status: str
+
+
+class VideoSummaryResponse(BaseModel):
+    """Summary metadata for one locally stored video."""
+
+    id: str
+    filename: str
+    created_at: datetime
+    duration: float
+    size_bytes: int
+    sha256: str
+    model: str
+
+
+class VideoDetailResponse(VideoSummaryResponse):
+    """Complete public metadata for one locally stored video."""
+
+    mime_type: str
+    metadata: dict[str, Any]

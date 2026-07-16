@@ -1,8 +1,12 @@
 """Tests for the local Helios HTTP API."""
 
+import json
 import socket
+import struct
 import unittest
+from hashlib import sha256
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -10,6 +14,23 @@ from fastapi.testclient import TestClient
 from apps.api.app import create_app
 from apps.api.models import ContentPipelineRequest, ContentPipelineResponse
 from apps.api.service import ContentPipelineService
+from engine.media.scanner import MediaStorageScanner
+
+
+def api_mp4_bytes(duration_seconds: float = 6.0) -> bytes:
+    """Create a minimal MP4 payload for API streaming tests."""
+    timescale = 1000
+    duration = int(duration_seconds * timescale)
+    mvhd_payload = b"\x00\x00\x00\x00" + struct.pack(
+        ">IIII",
+        0,
+        0,
+        timescale,
+        duration,
+    )
+    mvhd = struct.pack(">I4s", len(mvhd_payload) + 8, b"mvhd") + mvhd_payload
+    moov = struct.pack(">I4s", len(mvhd) + 8, b"moov") + mvhd
+    return struct.pack(">I4s", 16, b"ftyp") + b"isom\x00\x00\x00\x00" + moov
 
 
 class FailingContentPipelineService(ContentPipelineService):
@@ -173,6 +194,132 @@ class HeliosAPITestCase(unittest.TestCase):
             response = service.execute(request)
 
         self.assertEqual(response.status, "COMPLETED")
+
+
+class VideoAPITestCase(unittest.TestCase):
+    """Tests for local video discovery and HTTP streaming."""
+
+    def setUp(self) -> None:
+        """Create one temporary video catalog and isolated API client."""
+        self.temporary_directory = TemporaryDirectory()
+        self.output_directory = Path(self.temporary_directory.name)
+        self.video_bytes = api_mp4_bytes()
+        self.video_path = self.output_directory / "gen45-demo.mp4"
+        self.video_path.write_bytes(self.video_bytes)
+        self.video_path.with_suffix(".json").write_text(
+            json.dumps({"model": "gen4.5", "provider": "runway"}),
+            encoding="utf-8",
+        )
+
+        def scanner_factory() -> MediaStorageScanner:
+            return MediaStorageScanner(self.output_directory)
+
+        self.client = TestClient(create_app(scanner_factory=scanner_factory))
+        self.video_id = self.client.get("/api/videos").json()[0]["id"]
+
+    def tearDown(self) -> None:
+        """Remove temporary catalog files."""
+        self.temporary_directory.cleanup()
+
+    def test_video_list_returns_required_summary_fields(self) -> None:
+        """GET /api/videos exposes the compact catalog contract."""
+        response = self.client.get("/api/videos")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(
+            set(payload[0]),
+            {
+                "id",
+                "filename",
+                "created_at",
+                "duration",
+                "size_bytes",
+                "sha256",
+                "model",
+            },
+        )
+        self.assertEqual(payload[0]["duration"], 6.0)
+        self.assertEqual(payload[0]["model"], "gen4.5")
+        self.assertEqual(payload[0]["sha256"], sha256(self.video_bytes).hexdigest())
+
+    def test_video_detail_returns_complete_metadata(self) -> None:
+        """GET /api/videos/{id} includes MIME and sidecar metadata."""
+        response = self.client.get(f"/api/videos/{self.video_id}")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["mime_type"], "video/mp4")
+        self.assertEqual(payload["metadata"]["provider"], "runway")
+
+    def test_video_stream_returns_complete_mp4(self) -> None:
+        """A request without Range streams the entire local file."""
+        response = self.client.get(f"/api/videos/{self.video_id}/stream")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, self.video_bytes)
+        self.assertEqual(response.headers["accept-ranges"], "bytes")
+        self.assertEqual(response.headers["content-type"], "video/mp4")
+        self.assertEqual(
+            response.headers["content-length"],
+            str(len(self.video_bytes)),
+        )
+
+    def test_video_stream_supports_bounded_range(self) -> None:
+        """A bounded Range request returns exactly the selected bytes."""
+        response = self.client.get(
+            f"/api/videos/{self.video_id}/stream",
+            headers={"Range": "bytes=4-11"},
+        )
+
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response.content, self.video_bytes[4:12])
+        self.assertEqual(
+            response.headers["content-range"],
+            f"bytes 4-11/{len(self.video_bytes)}",
+        )
+        self.assertEqual(response.headers["content-length"], "8")
+
+    def test_video_stream_supports_open_and_suffix_ranges(self) -> None:
+        """Open-ended and suffix byte ranges follow HTTP semantics."""
+        open_response = self.client.get(
+            f"/api/videos/{self.video_id}/stream",
+            headers={"Range": "bytes=8-"},
+        )
+        suffix_response = self.client.get(
+            f"/api/videos/{self.video_id}/stream",
+            headers={"Range": "bytes=-7"},
+        )
+
+        self.assertEqual(open_response.content, self.video_bytes[8:])
+        self.assertEqual(suffix_response.content, self.video_bytes[-7:])
+        self.assertEqual(open_response.status_code, 206)
+        self.assertEqual(suffix_response.status_code, 206)
+
+    def test_invalid_range_returns_416(self) -> None:
+        """Unsatisfiable ranges return the complete file size."""
+        response = self.client.get(
+            f"/api/videos/{self.video_id}/stream",
+            headers={"Range": f"bytes={len(self.video_bytes)}-"},
+        )
+
+        self.assertEqual(response.status_code, 416)
+        self.assertEqual(
+            response.headers["content-range"],
+            f"bytes */{len(self.video_bytes)}",
+        )
+
+    def test_unknown_video_returns_404_for_detail_and_stream(self) -> None:
+        """Unknown public IDs never expose filesystem paths."""
+        for path in (
+            "/api/videos/missing",
+            "/api/videos/missing/stream",
+        ):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json(), {"detail": "Video not found."})
 
 
 if __name__ == "__main__":
